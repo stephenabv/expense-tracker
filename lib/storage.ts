@@ -6,29 +6,33 @@
  * writing one new implementation of this interface — the UI and the state
  * provider stay untouched, which is why every method is async.
  *
- * Storage holds the live tracker *and* the sealed daily history. Both are
- * source data: history is not derived from the current tracker, because the
- * current tracker changes and history must not.
+ * Only source data is stored: budgets and expenses. Balances, statuses and the
+ * whole of History are derived from these on demand.
  */
 
-import type { Expense, TrackerState } from "@/types/expense";
-import type { HistoryDay } from "@/types/history";
+import type { Budget } from "@/types/budget";
+import type { Expense } from "@/types/expense";
 import { MAX_AMOUNT, roundCurrency } from "@/lib/currency";
-import { MAX_NAME_LENGTH } from "@/lib/validation";
-import { backfillHistory, isValidDateKey, sortHistory } from "@/lib/history";
-import { calculateTotalExpenses, sortExpensesByNewest } from "@/lib/calculations";
+import { MAX_BUDGET_NAME_LENGTH, MAX_NAME_LENGTH } from "@/lib/validation";
+import { isValidDateKey, toDateKey, todayKey, type DateKey } from "@/lib/dates";
+import { sortBudgetsByPeriod } from "@/lib/budgets";
+import { sortExpensesByNewest } from "@/lib/calculations";
+import { createId } from "@/lib/utils";
 
-export const STORAGE_KEY = "expense-tracker:v2";
-export const LEGACY_STORAGE_KEY = "expense-tracker:v1";
-export const STORAGE_VERSION = 2;
+export const STORAGE_KEY = "expense-tracker:v3";
+/** Earlier single-budget formats, read once for migration. */
+export const LEGACY_STORAGE_KEYS = ["expense-tracker:v2", "expense-tracker:v1"];
+export const STORAGE_VERSION = 3;
 
-/** Everything the app persists. */
-export interface PersistedData extends TrackerState {
-  history: HistoryDay[];
+/** Name given to the budget created when migrating a single-budget tracker. */
+export const MIGRATED_BUDGET_NAME = "Original Budget";
+
+export interface PersistedData {
+  budgets: Budget[];
+  expenses: Expense[];
 }
 
-export const EMPTY_STATE: TrackerState = { budget: null, expenses: [] };
-export const EMPTY_DATA: PersistedData = { budget: null, expenses: [], history: [] };
+export const EMPTY_DATA: PersistedData = { budgets: [], expenses: [] };
 
 export interface TrackerRepository {
   load(): Promise<PersistedData>;
@@ -38,9 +42,8 @@ export interface TrackerRepository {
 
 interface PersistedShape {
   version: number;
-  budget: number | null;
+  budgets: Budget[];
   expenses: Expense[];
-  history: HistoryDay[];
 }
 
 function isRecord(value: unknown): value is Record<string, unknown> {
@@ -53,11 +56,49 @@ function toFiniteNumber(value: unknown): number | null {
   return numeric;
 }
 
-function sanitizeBudget(value: unknown): number | null {
-  if (value === null || value === undefined) return null;
-  const numeric = toFiniteNumber(value);
-  if (numeric === null || numeric < 0) return null;
-  return roundCurrency(Math.min(numeric, MAX_AMOUNT));
+function sanitizeText(value: unknown, max: number, fallback: string): string {
+  return typeof value === "string" && value.trim() !== ""
+    ? value.trim().slice(0, max)
+    : fallback;
+}
+
+function sanitizeTimestamp(value: unknown, fallback: string): string {
+  return typeof value === "string" && !Number.isNaN(Date.parse(value))
+    ? value
+    : fallback;
+}
+
+function sanitizeBudget(value: unknown, index: number): Budget | null {
+  if (!isRecord(value)) return null;
+
+  const amountRaw = toFiniteNumber(value.amount);
+  if (amountRaw === null || amountRaw < 0) return null;
+
+  // A budget without a usable period cannot decide which expenses it covers.
+  if (!isValidDateKey(value.startDate) || !isValidDateKey(value.endDate)) {
+    return null;
+  }
+
+  const startDate = value.startDate as DateKey;
+  const endDate = value.endDate as DateKey;
+  // Repair a reversed period rather than discarding the record.
+  const [start, end] = startDate <= endDate ? [startDate, endDate] : [endDate, startDate];
+
+  const createdAt = sanitizeTimestamp(value.createdAt, new Date(0).toISOString());
+
+  return {
+    id:
+      typeof value.id === "string" && value.id.trim() !== ""
+        ? value.id
+        : `recovered-budget-${index}-${Date.now()}`,
+    name: sanitizeText(value.name, MAX_BUDGET_NAME_LENGTH, "Untitled budget"),
+    amount: roundCurrency(Math.min(amountRaw, MAX_AMOUNT)),
+    startDate: start,
+    endDate: end,
+    createdAt,
+    updatedAt: sanitizeTimestamp(value.updatedAt, createdAt),
+    locked: value.locked !== false,
+  };
 }
 
 function sanitizeExpense(value: unknown, index: number): Expense | null {
@@ -69,101 +110,48 @@ function sanitizeExpense(value: unknown, index: number): Expense | null {
   const amount = roundCurrency(Math.min(Math.abs(amountRaw), MAX_AMOUNT));
   if (amount <= 0) return null;
 
-  const name =
-    typeof value.name === "string" && value.name.trim() !== ""
-      ? value.name.trim().slice(0, MAX_NAME_LENGTH)
-      : "Untitled expense";
+  if (typeof value.budgetId !== "string" || value.budgetId.trim() === "") {
+    return null;
+  }
 
-  const id =
-    typeof value.id === "string" && value.id.trim() !== ""
-      ? value.id
-      : `recovered-${index}-${Date.now()}`;
+  const createdAt = sanitizeTimestamp(value.createdAt, new Date(0).toISOString());
 
-  const createdAtRaw = value.createdAt;
-  const createdAt =
-    typeof createdAtRaw === "string" && !Number.isNaN(Date.parse(createdAtRaw))
-      ? createdAtRaw
-      : new Date(0).toISOString();
-
-  return { id, name, amount, createdAt };
-}
-
-function sanitizeExpenseList(value: unknown): Expense[] {
-  const list = Array.isArray(value) ? value : [];
-  const expenses = list
-    .map((expense, index) => sanitizeExpense(expense, index))
-    .filter((expense): expense is Expense => expense !== null);
-
-  // Guard against duplicate ids from hand-edited or merged storage.
-  const seen = new Set<string>();
-  return expenses.filter((expense) => {
-    if (seen.has(expense.id)) return false;
-    seen.add(expense.id);
-    return true;
-  });
-}
-
-/**
- * Repairs one stored history record.
- *
- * Recorded budgets and balances are trusted as written — that is the point of a
- * snapshot — but a missing or non-numeric figure is rebuilt from the record's
- * own expenses so a damaged entry still reports something coherent.
- */
-function sanitizeHistoryDay(value: unknown): HistoryDay | null {
-  if (!isRecord(value)) return null;
-  if (!isValidDateKey(value.date)) return null;
-
-  const expenses = sortExpensesByNewest(sanitizeExpenseList(value.expenses));
-  const derivedTotal = calculateTotalExpenses(expenses);
-
-  const totalExpenses = toFiniteNumber(value.totalExpenses);
-  const total = roundCurrency(
-    totalExpenses === null || totalExpenses < 0 ? derivedTotal : totalExpenses,
-  );
-
-  const budget = toFiniteNumber(value.budget);
-  const endingBalance = toFiniteNumber(value.endingBalance);
-  const startingBalance = toFiniteNumber(value.startingBalance);
-
-  const safeBudget = roundCurrency(budget === null ? total : budget);
-  const safeEnding = roundCurrency(
-    endingBalance === null ? safeBudget - total : endingBalance,
-  );
-  const safeStarting = roundCurrency(
-    startingBalance === null ? safeEnding + total : startingBalance,
-  );
+  // Fall back to the recording time when the calendar day is missing.
+  const expenseDate = isValidDateKey(value.expenseDate)
+    ? (value.expenseDate as DateKey)
+    : toDateKey(createdAt);
+  if (!isValidDateKey(expenseDate)) return null;
 
   return {
-    date: value.date,
-    budget: safeBudget,
-    startingBalance: safeStarting,
-    endingBalance: safeEnding,
-    totalExpenses: total,
-    expenses,
+    id:
+      typeof value.id === "string" && value.id.trim() !== ""
+        ? value.id
+        : `recovered-${index}-${Date.now()}`,
+    budgetId: value.budgetId,
+    name: sanitizeText(value.name, MAX_NAME_LENGTH, "Untitled expense"),
+    amount,
+    expenseDate,
+    createdAt,
+    updatedAt: sanitizeTimestamp(value.updatedAt, createdAt),
   };
 }
 
-function sanitizeHistory(value: unknown): HistoryDay[] {
-  const list = Array.isArray(value) ? value : [];
-  const days = list
-    .map(sanitizeHistoryDay)
-    .filter((day): day is HistoryDay => day !== null);
-
-  // One record per day wins — the last one written for a date.
-  const byDate = new Map<string, HistoryDay>();
-  for (const day of days) byDate.set(day.date, day);
-
-  return sortHistory([...byDate.values()]);
+function dedupeById<T extends { id: string }>(items: T[]): T[] {
+  const seen = new Set<string>();
+  return items.filter((item) => {
+    if (seen.has(item.id)) return false;
+    seen.add(item.id);
+    return true;
+  });
 }
 
 /**
  * Turns whatever was in storage into valid data.
  *
  * Malformed JSON, a wrong shape, or individual bad records are dropped rather
- * than thrown — a corrupted entry must never take down the whole app. Exported
- * separately from the repository so the recovery rules are unit testable
- * without a browser.
+ * than thrown — a corrupted entry must never take down the whole app. Expenses
+ * pointing at a budget that no longer exists are dropped too, since an expense
+ * with no allotment has no balance to belong to.
  */
 export function parseStoredData(raw: string | null): PersistedData {
   if (!raw) return { ...EMPTY_DATA };
@@ -177,29 +165,43 @@ export function parseStoredData(raw: string | null): PersistedData {
 
   if (!isRecord(parsed)) return { ...EMPTY_DATA };
 
+  const budgets = dedupeById(
+    (Array.isArray(parsed.budgets) ? parsed.budgets : [])
+      .map(sanitizeBudget)
+      .filter((budget): budget is Budget => budget !== null),
+  );
+
+  const budgetIds = new Set(budgets.map((budget) => budget.id));
+
+  const expenses = dedupeById(
+    (Array.isArray(parsed.expenses) ? parsed.expenses : [])
+      .map(sanitizeExpense)
+      .filter((expense): expense is Expense => expense !== null)
+      .filter((expense) => budgetIds.has(expense.budgetId)),
+  );
+
   return {
-    budget: sanitizeBudget(parsed.budget),
-    expenses: sanitizeExpenseList(parsed.expenses),
-    history: sanitizeHistory(parsed.history),
+    budgets: sortBudgetsByPeriod(budgets),
+    expenses: sortExpensesByNewest(expenses),
   };
 }
 
 export function serializeData(data: PersistedData): string {
   const payload: PersistedShape = {
     version: STORAGE_VERSION,
-    budget: data.budget,
+    budgets: data.budgets,
     expenses: data.expenses,
-    history: data.history,
   };
   return JSON.stringify(payload);
 }
 
 /**
- * Upgrades a v1 payload (tracker only, no history).
+ * Upgrades a single-budget payload (v1 or v2).
  *
- * History is reconstructed from the expenses that exist, using the only budget
- * on record. Those days seal on the next load, so this approximation happens
- * once and never drifts afterwards.
+ * Those versions had one global budget and no notion of a period, so the whole
+ * tracker becomes one allotment spanning the days it actually covers. The name
+ * is fixed rather than invented per-user, and the user can rename it like any
+ * other budget.
  */
 export function migrateLegacyData(
   raw: string | null,
@@ -207,20 +209,83 @@ export function migrateLegacyData(
 ): PersistedData | null {
   if (!raw) return null;
 
-  const legacy = parseStoredData(raw);
-  if (legacy.budget === null && legacy.expenses.length === 0) return null;
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(raw);
+  } catch {
+    return null;
+  }
+
+  if (!isRecord(parsed)) return null;
+  if (Array.isArray(parsed.budgets)) return null; // Already a v3 payload.
+
+  const amount = toFiniteNumber(parsed.budget);
+  const legacyExpenses = (Array.isArray(parsed.expenses) ? parsed.expenses : [])
+    .map((value, index) => {
+      if (!isRecord(value)) return null;
+
+      const expenseAmount = toFiniteNumber(value.amount);
+      if (expenseAmount === null) return null;
+
+      const rounded = roundCurrency(Math.min(Math.abs(expenseAmount), MAX_AMOUNT));
+      if (rounded <= 0) return null;
+
+      const createdAt = sanitizeTimestamp(value.createdAt, now.toISOString());
+      const expenseDate = toDateKey(createdAt);
+      if (!isValidDateKey(expenseDate)) return null;
+
+      return {
+        id:
+          typeof value.id === "string" && value.id.trim() !== ""
+            ? value.id
+            : `migrated-${index}-${Date.now()}`,
+        name: sanitizeText(value.name, MAX_NAME_LENGTH, "Untitled expense"),
+        amount: rounded,
+        expenseDate,
+        createdAt,
+      };
+    })
+    .filter((expense): expense is NonNullable<typeof expense> => expense !== null);
+
+  if (amount === null && legacyExpenses.length === 0) return null;
+
+  const today = todayKey(now);
+  const dates = legacyExpenses.map((expense) => expense.expenseDate).sort();
+
+  // Span every day the old tracker touched, and stay open through today so the
+  // migrated budget is still usable rather than instantly "completed".
+  const startDate = dates.length > 0 && dates[0] < today ? dates[0] : today;
+  const lastDate = dates.length > 0 ? dates[dates.length - 1] : today;
+  const endDate = lastDate > today ? lastDate : today;
+
+  const timestamp = now.toISOString();
+  const budget: Budget = {
+    id: createId(),
+    name: MIGRATED_BUDGET_NAME,
+    amount: roundCurrency(Math.min(Math.max(amount ?? 0, 0), MAX_AMOUNT)),
+    startDate,
+    endDate,
+    createdAt: timestamp,
+    updatedAt: timestamp,
+    locked: true,
+  };
 
   return {
-    budget: legacy.budget,
-    expenses: legacy.expenses,
-    history: backfillHistory(legacy, now),
+    budgets: [budget],
+    expenses: sortExpensesByNewest(
+      legacyExpenses.map((expense) => ({
+        ...expense,
+        budgetId: budget.id,
+        updatedAt: expense.createdAt,
+      })),
+    ),
   };
 }
 
 /** Browser-backed repository. Degrades to in-memory when storage is unavailable. */
 export function createLocalStorageRepository(
   key: string = STORAGE_KEY,
-  legacyKey: string = LEGACY_STORAGE_KEY,
+  legacyKeys: string[] = LEGACY_STORAGE_KEYS,
 ): TrackerRepository {
   const isAvailable = () => {
     try {
@@ -239,13 +304,13 @@ export function createLocalStorageRepository(
         const current = window.localStorage.getItem(key);
         if (current !== null) return parseStoredData(current);
 
-        // First run after the history feature shipped: carry v1 data forward.
-        const migrated = migrateLegacyData(
-          window.localStorage.getItem(legacyKey),
-        );
-        if (migrated) {
-          window.localStorage.setItem(key, serializeData(migrated));
-          return migrated;
+        // First run after multi-budget shipped: carry the old tracker forward.
+        for (const legacyKey of legacyKeys) {
+          const migrated = migrateLegacyData(window.localStorage.getItem(legacyKey));
+          if (migrated) {
+            window.localStorage.setItem(key, serializeData(migrated));
+            return migrated;
+          }
         }
 
         return { ...EMPTY_DATA };
@@ -267,7 +332,9 @@ export function createLocalStorageRepository(
       if (!isAvailable()) return;
       try {
         window.localStorage.removeItem(key);
-        window.localStorage.removeItem(legacyKey);
+        for (const legacyKey of legacyKeys) {
+          window.localStorage.removeItem(legacyKey);
+        }
       } catch {
         // Nothing further to do.
       }

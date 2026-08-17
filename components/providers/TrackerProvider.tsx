@@ -1,14 +1,14 @@
 "use client";
 
 /**
- * Owns the single source of truth for budget, expenses and sealed history.
+ * Owns the single source of truth: budget allotments and expenses.
  *
- * Components read derived totals from `useTracker()` and never compute money
+ * Components read derived figures from `useTracker()` and never compute money
  * themselves. Persistence goes through the injected `TrackerRepository`, so
  * moving to a database means passing a different repository here.
  *
- * Every mutating action carries the clock (`now`) so the reducer stays pure
- * while still being able to seal history by calendar day.
+ * Nothing derived is stored. Balances, statuses and History are all computed
+ * from budgets + expenses, which is why they can never drift apart.
  */
 
 import {
@@ -22,11 +22,10 @@ import {
   type ReactNode,
 } from "react";
 
-import type { Expense, ExpenseInput, TrackerTotals } from "@/types/expense";
-import type { HistoryDay } from "@/types/history";
+import type { Budget, BudgetInput, BudgetSummary } from "@/types/budget";
+import type { Expense, ExpenseInput } from "@/types/expense";
 import {
   calculateAvailableBalance,
-  calculateTotals,
   sortExpensesByNewest,
 } from "@/lib/calculations";
 import {
@@ -35,7 +34,15 @@ import {
   type PersistedData,
   type TrackerRepository,
 } from "@/lib/storage";
-import { syncHistory } from "@/lib/history";
+import {
+  activeBudget,
+  budgetsForDate,
+  expensesForBudget,
+  isCompleted,
+  sortBudgetsByPeriod,
+  summarizeBudgets,
+} from "@/lib/budgets";
+import { todayKey, type DateKey } from "@/lib/dates";
 import { roundCurrency } from "@/lib/currency";
 import { createId } from "@/lib/utils";
 
@@ -45,71 +52,90 @@ interface InternalState extends PersistedData {
 }
 
 type Action =
-  | { type: "hydrate"; payload: PersistedData; now: Date }
-  | { type: "setBudget"; payload: number; now: Date }
-  | { type: "addExpense"; payload: Expense; now: Date }
-  | { type: "updateExpense"; payload: { id: string; input: ExpenseInput }; now: Date }
-  | { type: "deleteExpense"; payload: { id: string }; now: Date }
+  | { type: "hydrate"; payload: PersistedData }
+  | { type: "addBudget"; payload: Budget }
+  | { type: "updateBudget"; payload: { id: string; input: BudgetInput; now: string } }
+  | { type: "setBudgetLocked"; payload: { id: string; locked: boolean; now: string } }
+  | { type: "deleteBudget"; payload: { id: string } }
+  | { type: "addExpense"; payload: Expense }
+  | { type: "updateExpense"; payload: { id: string; input: ExpenseInput; now: string } }
+  | { type: "deleteExpense"; payload: { id: string } }
   | { type: "reset" };
-
-/**
- * Re-seals history around a new tracker state.
- *
- * Only today's record can change; `syncHistory` passes every earlier day
- * through untouched, which is what keeps past reports stable when the budget or
- * an old expense is edited.
- */
-function withHistory(state: InternalState, now: Date): InternalState {
-  return {
-    ...state,
-    history: syncHistory(state.history, state, now),
-  };
-}
 
 function reducer(state: InternalState, action: Action): InternalState {
   switch (action.type) {
     case "hydrate":
-      return withHistory({ ...action.payload, hydrated: true }, action.now);
+      return { ...action.payload, hydrated: true };
 
-    case "setBudget":
-      return withHistory(
-        { ...state, budget: roundCurrency(action.payload) },
-        action.now,
-      );
+    case "addBudget":
+      return { ...state, budgets: [action.payload, ...state.budgets] };
+
+    case "updateBudget":
+      return {
+        ...state,
+        budgets: state.budgets.map((budget) =>
+          budget.id === action.payload.id
+            ? {
+                ...budget,
+                name: action.payload.input.name,
+                amount: roundCurrency(action.payload.input.amount),
+                startDate: action.payload.input.startDate,
+                endDate: action.payload.input.endDate,
+                updatedAt: action.payload.now,
+                // Saving re-locks: editing is always a deliberate, bounded act.
+                locked: true,
+              }
+            : budget,
+        ),
+      };
+
+    case "setBudgetLocked":
+      return {
+        ...state,
+        budgets: state.budgets.map((budget) =>
+          budget.id === action.payload.id
+            ? { ...budget, locked: action.payload.locked, updatedAt: action.payload.now }
+            : budget,
+        ),
+      };
+
+    case "deleteBudget":
+      return {
+        ...state,
+        budgets: state.budgets.filter((budget) => budget.id !== action.payload.id),
+        // An expense cannot outlive the allotment it was charged to.
+        expenses: state.expenses.filter(
+          (expense) => expense.budgetId !== action.payload.id,
+        ),
+      };
 
     case "addExpense":
-      return withHistory(
-        { ...state, expenses: [action.payload, ...state.expenses] },
-        action.now,
-      );
+      return { ...state, expenses: [action.payload, ...state.expenses] };
 
     case "updateExpense":
-      return withHistory(
-        {
-          ...state,
-          expenses: state.expenses.map((expense) =>
-            expense.id === action.payload.id
-              ? {
-                  ...expense,
-                  name: action.payload.input.name,
-                  amount: roundCurrency(action.payload.input.amount),
-                }
-              : expense,
-          ),
-        },
-        action.now,
-      );
+      return {
+        ...state,
+        expenses: state.expenses.map((expense) =>
+          expense.id === action.payload.id
+            ? {
+                ...expense,
+                name: action.payload.input.name,
+                amount: roundCurrency(action.payload.input.amount),
+                expenseDate: action.payload.input.expenseDate,
+                budgetId: action.payload.input.budgetId,
+                updatedAt: action.payload.now,
+              }
+            : expense,
+        ),
+      };
 
     case "deleteExpense":
-      return withHistory(
-        {
-          ...state,
-          expenses: state.expenses.filter(
-            (expense) => expense.id !== action.payload.id,
-          ),
-        },
-        action.now,
-      );
+      return {
+        ...state,
+        expenses: state.expenses.filter(
+          (expense) => expense.id !== action.payload.id,
+        ),
+      };
 
     case "reset":
       return { ...EMPTY_DATA, hydrated: true };
@@ -120,30 +146,38 @@ function reducer(state: InternalState, action: Action): InternalState {
 }
 
 interface TrackerContextValue {
-  /** True once persisted state has loaded. */
   hydrated: boolean;
-  /** `null` when the user has not configured a budget yet. */
-  budget: number | null;
-  /** Always sorted newest first. */
+  /** All allotments, newest period first. */
+  budgets: Budget[];
+  /** Derived figures for each budget, in the same order. */
+  budgetSummaries: BudgetSummary[];
+  /** Every expense, newest first. */
   expenses: Expense[];
-  totals: TrackerTotals;
-  /**
-   * Sealed daily records, oldest first.
-   *
-   * Past days are immutable snapshots — they keep the budget and balances that
-   * were in effect at the time, so they stay accurate after the budget changes.
-   */
-  history: HistoryDay[];
-  setBudget: (value: number) => void;
+  /** The allotment covering today, when exactly one does. */
+  currentBudget: Budget | null;
+
+  createBudget: (input: BudgetInput) => Budget;
+  updateBudget: (id: string, input: BudgetInput) => void;
+  setBudgetLocked: (id: string, locked: boolean) => void;
+  deleteBudget: (id: string) => void;
+
   addExpense: (input: ExpenseInput) => Expense;
   updateExpense: (id: string, input: ExpenseInput) => void;
   deleteExpense: (id: string) => void;
   resetAll: () => void;
+
+  /** Lookups that read the latest state without re-rendering their callers. */
+  getBudget: (id: string) => Budget | null;
+  getBudgetSummary: (id: string) => BudgetSummary | null;
+  expensesFor: (budgetId: string) => Expense[];
+  budgetsCovering: (date: DateKey) => Budget[];
   /**
-   * Balance an expense can draw from. Pass the id of the expense being edited
-   * so its current amount is not counted against the user twice.
+   * Balance a budget can still spend. Pass the id of the expense being edited so
+   * its current amount is not counted against the user twice.
    */
-  availableBalanceFor: (excludeExpenseId?: string) => number;
+  availableBalanceFor: (budgetId: string, excludeExpenseId?: string) => number;
+  /** True once the period has ended, which makes the budget immutable. */
+  isBudgetCompleted: (budget: Budget) => boolean;
 }
 
 const TrackerContext = createContext<TrackerContextValue | null>(null);
@@ -173,12 +207,10 @@ export function TrackerProvider({
     repo
       .load()
       .then((loaded) => {
-        if (!cancelled)
-          dispatch({ type: "hydrate", payload: loaded, now: new Date() });
+        if (!cancelled) dispatch({ type: "hydrate", payload: loaded });
       })
       .catch(() => {
-        if (!cancelled)
-          dispatch({ type: "hydrate", payload: EMPTY_DATA, now: new Date() });
+        if (!cancelled) dispatch({ type: "hydrate", payload: EMPTY_DATA });
       });
 
     return () => {
@@ -193,47 +225,77 @@ export function TrackerProvider({
 
   useEffect(() => {
     if (!state.hydrated) return;
-    void repo.save({
-      budget: state.budget,
-      expenses: state.expenses,
-      history: state.history,
-    });
-  }, [repo, state.hydrated, state.budget, state.expenses, state.history]);
+    void repo.save({ budgets: state.budgets, expenses: state.expenses });
+  }, [repo, state.hydrated, state.budgets, state.expenses]);
 
-  const setBudget = useCallback((value: number) => {
-    dispatch({ type: "setBudget", payload: value, now: new Date() });
-  }, []);
-
-  const addExpense = useCallback((input: ExpenseInput) => {
-    const expense: Expense = {
+  const createBudget = useCallback((input: BudgetInput) => {
+    const timestamp = new Date().toISOString();
+    const budget: Budget = {
       id: createId(),
       name: input.name,
       amount: roundCurrency(input.amount),
-      createdAt: new Date().toISOString(),
+      startDate: input.startDate,
+      endDate: input.endDate,
+      createdAt: timestamp,
+      updatedAt: timestamp,
+      // New budgets arrive locked, so the amount cannot be nudged by accident.
+      locked: true,
     };
-    dispatch({ type: "addExpense", payload: expense, now: new Date() });
+    dispatch({ type: "addBudget", payload: budget });
+    return budget;
+  }, []);
+
+  const updateBudget = useCallback((id: string, input: BudgetInput) => {
+    dispatch({
+      type: "updateBudget",
+      payload: { id, input, now: new Date().toISOString() },
+    });
+  }, []);
+
+  const setBudgetLocked = useCallback((id: string, locked: boolean) => {
+    dispatch({
+      type: "setBudgetLocked",
+      payload: { id, locked, now: new Date().toISOString() },
+    });
+  }, []);
+
+  const deleteBudget = useCallback((id: string) => {
+    dispatch({ type: "deleteBudget", payload: { id } });
+  }, []);
+
+  const addExpense = useCallback((input: ExpenseInput) => {
+    const timestamp = new Date().toISOString();
+    const expense: Expense = {
+      id: createId(),
+      budgetId: input.budgetId,
+      name: input.name,
+      amount: roundCurrency(input.amount),
+      expenseDate: input.expenseDate,
+      createdAt: timestamp,
+      updatedAt: timestamp,
+    };
+    dispatch({ type: "addExpense", payload: expense });
     return expense;
   }, []);
 
   const updateExpense = useCallback((id: string, input: ExpenseInput) => {
-    dispatch({ type: "updateExpense", payload: { id, input }, now: new Date() });
+    dispatch({
+      type: "updateExpense",
+      payload: { id, input, now: new Date().toISOString() },
+    });
   }, []);
 
   const deleteExpense = useCallback((id: string) => {
-    dispatch({ type: "deleteExpense", payload: { id }, now: new Date() });
+    dispatch({ type: "deleteExpense", payload: { id } });
   }, []);
 
   const resetAll = useCallback(() => {
     dispatch({ type: "reset" });
   }, []);
 
-  const availableBalanceFor = useCallback(
-    (excludeExpenseId?: string) =>
-      calculateAvailableBalance(
-        { budget: stateRef.current.budget, expenses: stateRef.current.expenses },
-        excludeExpenseId,
-      ),
-    [],
+  const sortedBudgets = useMemo(
+    () => sortBudgetsByPeriod(state.budgets),
+    [state.budgets],
   );
 
   const sortedExpenses = useMemo(
@@ -241,37 +303,95 @@ export function TrackerProvider({
     [state.expenses],
   );
 
-  const totals = useMemo(
-    () => calculateTotals({ budget: state.budget, expenses: state.expenses }),
-    [state.budget, state.expenses],
+  const budgetSummaries = useMemo(
+    () => summarizeBudgets(sortedBudgets, state.expenses),
+    [sortedBudgets, state.expenses],
   );
+
+  const currentBudget = useMemo(
+    () => activeBudget(sortedBudgets),
+    [sortedBudgets],
+  );
+
+  const getBudget = useCallback(
+    (id: string) => stateRef.current.budgets.find((b) => b.id === id) ?? null,
+    [],
+  );
+
+  const getBudgetSummary = useCallback(
+    (id: string) => budgetSummaries.find((entry) => entry.budget.id === id) ?? null,
+    [budgetSummaries],
+  );
+
+  const expensesFor = useCallback(
+    (budgetId: string) =>
+      sortExpensesByNewest(expensesForBudget(stateRef.current.expenses, budgetId)),
+    [],
+  );
+
+  const budgetsCovering = useCallback(
+    (date: DateKey) => budgetsForDate(stateRef.current.budgets, date),
+    [],
+  );
+
+  const availableBalanceFor = useCallback(
+    (budgetId: string, excludeExpenseId?: string) => {
+      const budget = stateRef.current.budgets.find((b) => b.id === budgetId);
+      if (!budget) return 0;
+
+      return calculateAvailableBalance(
+        budget.amount,
+        expensesForBudget(stateRef.current.expenses, budgetId),
+        excludeExpenseId,
+      );
+    },
+    [],
+  );
+
+  const isBudgetCompleted = useCallback((budget: Budget) => isCompleted(budget), []);
 
   const value = useMemo<TrackerContextValue>(
     () => ({
       hydrated: state.hydrated,
-      budget: state.budget,
+      budgets: sortedBudgets,
+      budgetSummaries,
       expenses: sortedExpenses,
-      totals,
-      history: state.history,
-      setBudget,
+      currentBudget,
+      createBudget,
+      updateBudget,
+      setBudgetLocked,
+      deleteBudget,
       addExpense,
       updateExpense,
       deleteExpense,
       resetAll,
+      getBudget,
+      getBudgetSummary,
+      expensesFor,
+      budgetsCovering,
       availableBalanceFor,
+      isBudgetCompleted,
     }),
     [
       state.hydrated,
-      state.budget,
+      sortedBudgets,
+      budgetSummaries,
       sortedExpenses,
-      totals,
-      state.history,
-      setBudget,
+      currentBudget,
+      createBudget,
+      updateBudget,
+      setBudgetLocked,
+      deleteBudget,
       addExpense,
       updateExpense,
       deleteExpense,
       resetAll,
+      getBudget,
+      getBudgetSummary,
+      expensesFor,
+      budgetsCovering,
       availableBalanceFor,
+      isBudgetCompleted,
     ],
   );
 
@@ -286,4 +406,9 @@ export function useTracker(): TrackerContextValue {
     throw new Error("useTracker must be used within a TrackerProvider");
   }
   return context;
+}
+
+/** Today's date key — handy default for date inputs. */
+export function useToday(): DateKey {
+  return useMemo(() => todayKey(), []);
 }
