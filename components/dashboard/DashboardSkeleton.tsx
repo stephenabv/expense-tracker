@@ -9,13 +9,11 @@ export function DashboardSkeleton() {
       <div className="space-y-4 sm:space-y-5">
         <div className="h-44 animate-pulse rounded-2xl border border-border-subtle bg-surface" />
 
-        <div className="grid grid-cols-1 gap-4 sm:grid-cols-3 sm:gap-5">
-          {[0, 1, 2].map((index) => (
-            <div
-              key={index}
-              className="h-28 animate-pulse rounded-2xl border border-border-subtle bg-surface"
-            />
-          ))}
+        {/* Mirrors the real stat grid so the layout does not shift on hydration. */}
+        <div className="grid grid-cols-2 gap-4 sm:grid-cols-3 sm:gap-5">
+          <div className="col-span-2 h-28 animate-pulse rounded-2xl border border-border-subtle bg-surface sm:col-span-1" />
+          <div className="h-28 animate-pulse rounded-2xl border border-border-subtle bg-surface" />
+          <div className="h-28 animate-pulse rounded-2xl border border-border-subtle bg-surface" />
         </div>
 
         <div className="h-56 animate-pulse rounded-2xl border border-border-subtle bg-surface" />
