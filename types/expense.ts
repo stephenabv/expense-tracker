@@ -1,46 +1,36 @@
 /**
- * Core domain types.
+ * Expense types.
  *
  * The persisted shape is deliberately minimal: only source-of-truth values are
- * stored. Everything derivable (total expenses, current balance) is computed in
+ * stored. Everything derivable (totals, balances) is computed in
  * `lib/calculations.ts` so the UI can never drift from the records.
  */
+
+import type { DateKey } from "@/lib/dates";
 
 export interface Expense {
   /** Stable unique identifier. */
   id: string;
+  /** The budget this expense is charged against. Referenced by id so that
+   *  renaming a budget cannot break the association. */
+  budgetId: string;
   /** Human-readable label, e.g. "Food". */
   name: string;
   /** Positive amount in the major currency unit (pesos). */
   amount: number;
-  /** ISO-8601 timestamp of when the expense was recorded. */
+  /** The calendar day the expense is for. This — not `createdAt` — decides
+   *  which budget applies, so a user can record yesterday's lunch today. */
+  expenseDate: DateKey;
+  /** When the record was first created. */
   createdAt: string;
+  /** When the record was last modified. */
+  updatedAt: string;
 }
 
 /** Fields a user supplies when creating or editing an expense. */
 export interface ExpenseInput {
   name: string;
   amount: number;
-}
-
-/**
- * The complete persisted application state.
- *
- * `budget` is `null` until the user configures one for the first time, which is
- * what drives the onboarding experience.
- */
-export interface TrackerState {
-  budget: number | null;
-  expenses: Expense[];
-}
-
-/** Derived, never-persisted view of the financial state. */
-export interface TrackerTotals {
-  budget: number;
-  totalExpenses: number;
-  currentBalance: number;
-  expenseCount: number;
-  /** Fraction of the budget consumed, clamped to 0–1. `0` when budget is 0. */
-  spentRatio: number;
-  isOverspent: boolean;
+  expenseDate: DateKey;
+  budgetId: string;
 }
