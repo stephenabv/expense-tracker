@@ -1,8 +1,8 @@
 # Expense Tracker
 
 A minimalist personal budget and expense tracker built with Next.js, TypeScript
-and Tailwind CSS. Set a budget allotment, record expenses, and always see the
-balance you have left — in Philippine Peso.
+and Tailwind CSS. Set a budget allotment, record expenses, review your history
+by date, and export it as a PDF — in Philippine Peso.
 
 The whole app is built on one rule:
 
@@ -28,6 +28,15 @@ records on every render, so the dashboard can't drift out of sync with the data.
   Corrupted or partially-broken data is repaired rather than crashing the app.
 - **Peso formatting** — `Intl.NumberFormat` throughout; money is summed in whole
   centavos so repeated addition never drifts.
+- **History** — a dedicated section for previously recorded days, filterable by
+  a single date or an inclusive date range, with presets (Today, Yesterday, Last
+  7 Days, This Month, Last Month, All Time) and a collapsible daily breakdown.
+- **Immutable snapshots** — each day is sealed once it passes, keeping the
+  budget and balances that were in effect at the time. Changing today's budget
+  or deleting an old expense never rewrites what a past day reported.
+- **PDF export** — a real, paginated PDF document (selectable text, repeated
+  table headers, page numbers), containing exactly the days the active filter
+  selected.
 - **Responsive and accessible** — mobile-first, with a bottom-sheet dialog on
   phones, keyboard-navigable controls, focus trapping in dialogs, visible focus
   states and a dark theme that follows the system setting.
@@ -41,6 +50,7 @@ records on every render, so the dashboard can't drift out of sync with the data.
 | Styling    | Tailwind CSS v4              |
 | State      | React Context + `useReducer` |
 | Storage    | `localStorage` behind a repository interface |
+| PDF        | jsPDF + jspdf-autotable      |
 | Tests      | Vitest                       |
 | Deployment | Vercel                       |
 
@@ -82,7 +92,8 @@ commit them, and never expose them through a `NEXT_PUBLIC_` variable.
 ```
 app/
 ├── layout.tsx          # Root layout, providers, metadata
-├── page.tsx            # Dashboard route
+├── page.tsx            # Tracker route
+├── history/page.tsx    # History route
 ├── error.tsx           # Error boundary with a recovery action
 ├── not-found.tsx       # 404
 ├── icon.svg            # Favicon
@@ -103,20 +114,36 @@ components/
 │   ├── AddExpenseModal.tsx
 │   ├── EditExpenseModal.tsx
 │   └── AddExpenseButton.tsx # Floating action button
+├── history/
+│   ├── HistoryView.tsx      # History screen; filter → results → export
+│   ├── HistoryFilterBar.tsx # Presets, single date / range, validation
+│   ├── HistorySummaryCard.tsx
+│   ├── HistoryDayCard.tsx   # Collapsible day with its recorded figures
+│   └── ExportPdfButton.tsx  # Loads the PDF code on demand
+├── layout/
+│   └── AppShell.tsx         # Page frame + Tracker / History navigation
 ├── providers/
 │   └── TrackerProvider.tsx  # Single source of truth
-└── ui/                      # Button, TextField, Modal, ConfirmDialog, …
+└── ui/                      # Button, TextField, DateField, Modal, …
 
 lib/
 ├── calculations.ts     # Totals, balance, sorting — all money maths
+├── history.ts          # Day sealing, filtering, summaries, presets
 ├── validation.ts       # Budget and expense rules
 ├── currency.ts         # Peso formatting, parsing, rounding
 ├── storage.ts          # Repository interface + localStorage implementation
 ├── utils.ts            # Dates, ids, class names
+├── pdf/
+│   ├── report.ts       # PDF document builder
+│   └── font.ts         # Generated font subset (see scripts/)
 └── __tests__/          # Unit tests
 
 types/
-└── expense.ts          # Domain types
+├── expense.ts          # Tracker domain types
+└── history.ts          # History domain types
+
+scripts/
+└── build-pdf-font.py   # Regenerates lib/pdf/font.ts
 ```
 
 ### Architecture notes
@@ -148,26 +175,72 @@ an `allowOverdraft` option (default `false`, via
 `ALLOW_OVERDRAFT_BY_DEFAULT`). Supporting negative balances later means flipping
 that flag rather than reworking the forms.
 
+**History is source data, not a view of the current tracker.** This is the rule
+the whole history feature turns on: *past days are sealed*. The record for today
+is kept in step with the live tracker because the day is still being written, but
+any earlier day is frozen exactly as recorded — with the budget and balances that
+were in effect at the time.
+
+Rebuilding history from today's budget would be simpler and wrong: lowering your
+budget would silently rewrite last week's report, and a PDF exported today would
+disagree with the one exported yesterday. So `syncHistory` only ever writes
+today's record and passes every earlier day through untouched. It will *add* a
+record for a past day that has expenses but was never recorded (self-healing),
+but it never overwrites one.
+
+A day is recorded only once something is spent on it. Inventing an empty record
+would turn "no activity" into a misleading row of zeroes.
+
+**Summaries do not add up what should not be added.** Expenses are summed across
+the period; budgets and balances are point-in-time values, so the starting
+figures come from the earliest day in range and the ending balance from the
+latest — both read from the snapshots rather than recomputed.
+
 ## Stored data
 
 ```jsonc
 {
-  "version": 1,
+  "version": 2,
   "budget": 13000,
   "expenses": [
     {
       "id": "b1e7…",
       "name": "Food",
       "amount": 500,
-      "createdAt": "2026-01-01T04:30:00.000Z"
+      "createdAt": "2026-08-17T04:30:00.000Z"
+    }
+  ],
+  // Sealed daily snapshots — the source of truth for History.
+  "history": [
+    {
+      "date": "2026-08-17",
+      "budget": 13000,
+      "startingBalance": 13000,
+      "endingBalance": 12500,
+      "totalExpenses": 500,
+      "expenses": [
+        {
+          "id": "b1e7…",
+          "name": "Food",
+          "amount": 500,
+          "createdAt": "2026-08-17T04:30:00.000Z"
+        }
+      ]
     }
   ]
 }
 ```
 
-Stored under the key `expense-tracker:v1`. On load the payload is validated
+Stored under the key `expense-tracker:v2`. On load the payload is validated
 field by field: malformed JSON falls back to an empty state, and individual bad
-records are dropped or repaired so one bad entry can't break the dashboard.
+records are dropped or repaired so one bad entry can't break the app. Recorded
+budgets and balances are trusted as written — that is the point of a snapshot —
+but a missing figure is rebuilt from that record's own expenses.
+
+A `v1` payload (tracker only, no history) is migrated automatically on first
+load: history is reconstructed from the expenses that exist, using the only
+budget on record. Those days then seal normally, so the approximation happens
+once and never drifts.
 
 ## Testing
 
@@ -175,10 +248,23 @@ records are dropped or repaired so one bad entry can't break the dashboard.
 npm test
 ```
 
-The suite covers the calculation, currency, validation and storage-recovery
-layers — the core rule, rounding across many fractional amounts, zero and
-negative budgets, the overdraft check, and recovery from corrupted or
-partially-broken saved data.
+The suite covers the calculation, currency, validation, history and PDF layers —
+the core rule, rounding across many fractional amounts, zero and negative
+budgets, the overdraft check, recovery from corrupted or partially-broken saved
+data, single-day and inclusive-range filtering, invalid ranges, the immutability
+of sealed days, and PDF generation including pagination of large datasets.
+
+### Regenerating the PDF font
+
+`lib/pdf/font.ts` is generated and checked in, so a normal build needs nothing
+extra. jsPDF's built-in fonts are WinAnsi-encoded and have no peso sign, so the
+report embeds a DejaVu Sans subset instead — without it every amount would print
+as a missing glyph. To rebuild it:
+
+```bash
+pip install fonttools
+python3 scripts/build-pdf-font.py
+```
 
 ## Building for production
 
