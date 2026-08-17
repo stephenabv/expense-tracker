@@ -1,11 +1,14 @@
 "use client";
 
 /**
- * Owns the single source of truth for budget and expenses.
+ * Owns the single source of truth for budget, expenses and sealed history.
  *
  * Components read derived totals from `useTracker()` and never compute money
  * themselves. Persistence goes through the injected `TrackerRepository`, so
  * moving to a database means passing a different repository here.
+ *
+ * Every mutating action carries the clock (`now`) so the reducer stays pure
+ * while still being able to seal history by calendar day.
  */
 
 import {
@@ -19,68 +22,97 @@ import {
   type ReactNode,
 } from "react";
 
-import type { Expense, ExpenseInput, TrackerState, TrackerTotals } from "@/types/expense";
+import type { Expense, ExpenseInput, TrackerTotals } from "@/types/expense";
+import type { HistoryDay } from "@/types/history";
 import {
   calculateAvailableBalance,
   calculateTotals,
   sortExpensesByNewest,
 } from "@/lib/calculations";
 import {
-  EMPTY_STATE,
+  EMPTY_DATA,
   createLocalStorageRepository,
+  type PersistedData,
   type TrackerRepository,
 } from "@/lib/storage";
+import { syncHistory } from "@/lib/history";
 import { roundCurrency } from "@/lib/currency";
 import { createId } from "@/lib/utils";
 
-interface InternalState extends TrackerState {
+interface InternalState extends PersistedData {
   /** False until persisted data has been read, so the UI can avoid a flash. */
   hydrated: boolean;
 }
 
 type Action =
-  | { type: "hydrate"; payload: TrackerState }
-  | { type: "setBudget"; payload: number }
-  | { type: "addExpense"; payload: Expense }
-  | { type: "updateExpense"; payload: { id: string; input: ExpenseInput } }
-  | { type: "deleteExpense"; payload: { id: string } }
+  | { type: "hydrate"; payload: PersistedData; now: Date }
+  | { type: "setBudget"; payload: number; now: Date }
+  | { type: "addExpense"; payload: Expense; now: Date }
+  | { type: "updateExpense"; payload: { id: string; input: ExpenseInput }; now: Date }
+  | { type: "deleteExpense"; payload: { id: string }; now: Date }
   | { type: "reset" };
+
+/**
+ * Re-seals history around a new tracker state.
+ *
+ * Only today's record can change; `syncHistory` passes every earlier day
+ * through untouched, which is what keeps past reports stable when the budget or
+ * an old expense is edited.
+ */
+function withHistory(state: InternalState, now: Date): InternalState {
+  return {
+    ...state,
+    history: syncHistory(state.history, state, now),
+  };
+}
 
 function reducer(state: InternalState, action: Action): InternalState {
   switch (action.type) {
     case "hydrate":
-      return { ...action.payload, hydrated: true };
+      return withHistory({ ...action.payload, hydrated: true }, action.now);
 
     case "setBudget":
-      return { ...state, budget: roundCurrency(action.payload) };
+      return withHistory(
+        { ...state, budget: roundCurrency(action.payload) },
+        action.now,
+      );
 
     case "addExpense":
-      return { ...state, expenses: [action.payload, ...state.expenses] };
+      return withHistory(
+        { ...state, expenses: [action.payload, ...state.expenses] },
+        action.now,
+      );
 
     case "updateExpense":
-      return {
-        ...state,
-        expenses: state.expenses.map((expense) =>
-          expense.id === action.payload.id
-            ? {
-                ...expense,
-                name: action.payload.input.name,
-                amount: roundCurrency(action.payload.input.amount),
-              }
-            : expense,
-        ),
-      };
+      return withHistory(
+        {
+          ...state,
+          expenses: state.expenses.map((expense) =>
+            expense.id === action.payload.id
+              ? {
+                  ...expense,
+                  name: action.payload.input.name,
+                  amount: roundCurrency(action.payload.input.amount),
+                }
+              : expense,
+          ),
+        },
+        action.now,
+      );
 
     case "deleteExpense":
-      return {
-        ...state,
-        expenses: state.expenses.filter(
-          (expense) => expense.id !== action.payload.id,
-        ),
-      };
+      return withHistory(
+        {
+          ...state,
+          expenses: state.expenses.filter(
+            (expense) => expense.id !== action.payload.id,
+          ),
+        },
+        action.now,
+      );
 
     case "reset":
-      return { ...EMPTY_STATE, hydrated: true };
+      return { ...EMPTY_DATA, hydrated: true };
 
     default:
       return state;
@@ -95,6 +127,13 @@ interface TrackerContextValue {
   /** Always sorted newest first. */
   expenses: Expense[];
   totals: TrackerTotals;
+  /**
+   * Sealed daily records, oldest first.
+   *
+   * Past days are immutable snapshots — they keep the budget and balances that
+   * were in effect at the time, so they stay accurate after the budget changes.
+   */
+  history: HistoryDay[];
   setBudget: (value: number) => void;
   addExpense: (input: ExpenseInput) => Expense;
   updateExpense: (id: string, input: ExpenseInput) => void;
@@ -122,7 +161,7 @@ export function TrackerProvider({
   );
 
   const [state, dispatch] = useReducer(reducer, {
-    ...EMPTY_STATE,
+    ...EMPTY_DATA,
     hydrated: false,
   });
 
@@ -134,10 +173,12 @@ export function TrackerProvider({
     repo
       .load()
       .then((loaded) => {
-        if (!cancelled) dispatch({ type: "hydrate", payload: loaded });
+        if (!cancelled)
+          dispatch({ type: "hydrate", payload: loaded, now: new Date() });
       })
       .catch(() => {
-        if (!cancelled) dispatch({ type: "hydrate", payload: EMPTY_STATE });
+        if (!cancelled)
+          dispatch({ type: "hydrate", payload: EMPTY_DATA, now: new Date() });
       });
 
     return () => {
@@ -152,11 +193,15 @@ export function TrackerProvider({
 
   useEffect(() => {
     if (!state.hydrated) return;
-    void repo.save({ budget: state.budget, expenses: state.expenses });
-  }, [repo, state.hydrated, state.budget, state.expenses]);
+    void repo.save({
+      budget: state.budget,
+      expenses: state.expenses,
+      history: state.history,
+    });
+  }, [repo, state.hydrated, state.budget, state.expenses, state.history]);
 
   const setBudget = useCallback((value: number) => {
-    dispatch({ type: "setBudget", payload: value });
+    dispatch({ type: "setBudget", payload: value, now: new Date() });
   }, []);
 
   const addExpense = useCallback((input: ExpenseInput) => {
@@ -166,16 +211,16 @@ export function TrackerProvider({
       amount: roundCurrency(input.amount),
       createdAt: new Date().toISOString(),
     };
-    dispatch({ type: "addExpense", payload: expense });
+    dispatch({ type: "addExpense", payload: expense, now: new Date() });
     return expense;
   }, []);
 
   const updateExpense = useCallback((id: string, input: ExpenseInput) => {
-    dispatch({ type: "updateExpense", payload: { id, input } });
+    dispatch({ type: "updateExpense", payload: { id, input }, now: new Date() });
   }, []);
 
   const deleteExpense = useCallback((id: string) => {
-    dispatch({ type: "deleteExpense", payload: { id } });
+    dispatch({ type: "deleteExpense", payload: { id }, now: new Date() });
   }, []);
 
   const resetAll = useCallback(() => {
@@ -207,6 +252,7 @@ export function TrackerProvider({
       budget: state.budget,
       expenses: sortedExpenses,
       totals,
+      history: state.history,
       setBudget,
       addExpense,
       updateExpense,
@@ -219,6 +265,7 @@ export function TrackerProvider({
       state.budget,
       sortedExpenses,
       totals,
+      state.history,
       setBudget,
       addExpense,
       updateExpense,
