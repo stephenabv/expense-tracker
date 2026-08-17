@@ -8,12 +8,15 @@ import { useToast } from "@/components/ui/Toast";
 import { Button } from "@/components/ui/Button";
 import { Modal } from "@/components/ui/Modal";
 import { TextField } from "@/components/ui/TextField";
+import { DateField } from "@/components/ui/DateField";
+import { SelectField } from "@/components/ui/SelectField";
 import {
   CURRENCY_SYMBOL,
   formatAmount,
   formatCurrency,
   parseAmount,
 } from "@/lib/currency";
+import { formatDateKey, formatDateRange, todayKey } from "@/lib/dates";
 import {
   MAX_NAME_LENGTH,
   validateExpenseForm,
@@ -27,55 +30,90 @@ export interface ExpenseFormModalProps {
   onClose: () => void;
   /** Provide an expense to edit it; omit to create a new one. */
   expense?: Expense | null;
+  /** Opens the budget form when no allotment covers the chosen date. */
+  onCreateBudget?: (date: string) => void;
 }
 
 /**
- * Shared add/edit form.
+ * Shared add/edit expense form.
  *
- * Both flows run the exact same validation — including the overdraft check —
- * so an edit can no more push the balance negative than a new expense can.
+ * The expense date drives everything: it decides which allotment applies, and
+ * the amount is measured against *that* budget's balance. When no budget covers
+ * the date the form says so and offers to create one, rather than quietly
+ * charging an unrelated allotment.
  */
 export function ExpenseFormModal({
   open,
   onClose,
   expense = null,
+  onCreateBudget,
 }: ExpenseFormModalProps) {
-  const { addExpense, updateExpense, availableBalanceFor, budget } = useTracker();
+  const { addExpense, updateExpense, availableBalanceFor, budgetsCovering } =
+    useTracker();
   const { showToast } = useToast();
 
   const isEditing = expense !== null;
+  const today = todayKey();
 
   const [name, setName] = useState("");
   const [amount, setAmount] = useState("");
+  const [expenseDate, setExpenseDate] = useState(today);
+  const [budgetId, setBudgetId] = useState("");
   const [errors, setErrors] = useState<ExpenseFormErrors>({});
   const nameRef = useRef<HTMLInputElement>(null);
 
-  // Balance this expense draws from. When editing, the row's own amount is
-  // excluded so the user is not charged for it twice.
-  const availableBalance = useMemo(() => {
-    if (!open) return 0;
-    return availableBalanceFor(expense?.id);
-    // `open` and the expense identify the moment the dialog was launched.
-  }, [open, expense?.id, availableBalanceFor]);
-
-  // Reset the form each time the dialog opens.
   useEffect(() => {
     if (!open) return;
+
+    const date = expense?.expenseDate ?? today;
     setName(expense?.name ?? "");
     setAmount(expense ? formatAmount(expense.amount) : "");
+    setExpenseDate(date);
+    setBudgetId(expense?.budgetId ?? "");
     setErrors({});
-  }, [open, expense]);
+  }, [open, expense, today]);
+
+  // Budgets whose period covers the chosen date. Overlaps are prevented, so
+  // this is normally exactly one — but the form still handles several rather
+  // than assuming.
+  const applicable = useMemo(() => {
+    if (!open) return [];
+    return budgetsCovering(expenseDate);
+  }, [open, expenseDate, budgetsCovering]);
+
+  // Auto-select when there is only one valid choice; never guess between two.
+  useEffect(() => {
+    if (!open) return;
+    if (applicable.length === 1) {
+      setBudgetId(applicable[0].id);
+    } else if (!applicable.some((budget) => budget.id === budgetId)) {
+      setBudgetId("");
+    }
+  }, [open, applicable, budgetId]);
+
+  const selectedBudget = applicable.find((budget) => budget.id === budgetId) ?? null;
+
+  const availableBalance = useMemo(() => {
+    if (!open || !selectedBudget) return 0;
+    return availableBalanceFor(selectedBudget.id, expense?.id);
+  }, [open, selectedBudget, availableBalanceFor, expense?.id]);
 
   const parsedAmount = parseAmount(amount);
   const exceedsBalance =
+    selectedBudget !== null &&
     parsedAmount !== null &&
     parsedAmount > 0 &&
     parsedAmount > availableBalance;
 
+  const noBudget = applicable.length === 0;
+
   const handleSubmit = (event: React.FormEvent) => {
     event.preventDefault();
 
-    const result = validateExpenseForm(name, amount, { availableBalance });
+    const result = validateExpenseForm(name, amount, expenseDate, budgetId, {
+      applicableBudgets: applicable,
+      availableBalance: selectedBudget ? availableBalance : undefined,
+    });
 
     if (!result.ok) {
       setErrors(result.errors);
@@ -96,17 +134,15 @@ export function ExpenseFormModal({
     onClose();
   };
 
-  const budgetConfigured = budget !== null;
-
   return (
     <Modal
       open={open}
       onClose={onClose}
       title={isEditing ? "Edit Expense" : "Add Expense"}
       description={
-        budgetConfigured
-          ? `Available balance ${formatCurrency(Math.max(availableBalance, 0))}`
-          : "Set a budget allotment to track this against your balance."
+        selectedBudget
+          ? `${selectedBudget.name} · ${formatCurrency(Math.max(availableBalance, 0))} available`
+          : "Choose a date covered by one of your budget allotments."
       }
       footer={
         <>
@@ -117,7 +153,7 @@ export function ExpenseFormModal({
             type="submit"
             form={FORM_ID}
             className="flex-1"
-            disabled={exceedsBalance}
+            disabled={exceedsBalance || noBudget}
           >
             {isEditing ? "Save changes" : "Add Expense"}
           </Button>
@@ -128,7 +164,7 @@ export function ExpenseFormModal({
         <TextField
           ref={nameRef}
           label="Expense Name"
-          placeholder="Food"
+          placeholder="Groceries"
           value={name}
           maxLength={MAX_NAME_LENGTH}
           autoComplete="off"
@@ -148,22 +184,84 @@ export function ExpenseFormModal({
           autoComplete="off"
           enterKeyHint="done"
           prefix={CURRENCY_SYMBOL}
-          error={errors.amount}
           className="font-semibold tabular"
+          error={errors.amount}
           onChange={(event) => {
             setAmount(event.target.value);
-            if (errors.amount)
-              setErrors((prev) => ({ ...prev, amount: undefined }));
+            if (errors.amount) setErrors((prev) => ({ ...prev, amount: undefined }));
           }}
         />
 
-        {exceedsBalance ? (
+        <DateField
+          label="Date"
+          value={expenseDate}
+          invalid={errors.expenseDate !== undefined}
+          onChange={(event) => {
+            setExpenseDate(event.target.value);
+            setErrors((prev) => ({
+              ...prev,
+              expenseDate: undefined,
+              budgetId: undefined,
+              amount: undefined,
+            }));
+          }}
+        />
+
+        {noBudget ? (
+          <div
+            role="alert"
+            className="rounded-xl border border-warning/30 bg-warning-soft p-3.5"
+          >
+            <p className="text-sm font-medium text-warning">
+              No budget is assigned to this date.
+            </p>
+            <p className="mt-1 text-[0.8125rem] text-muted-strong">
+              There is currently no budget allotment covering{" "}
+              {formatDateKey(expenseDate)}.
+            </p>
+            {onCreateBudget ? (
+              <Button
+                size="sm"
+                className="mt-3"
+                onClick={() => onCreateBudget(expenseDate)}
+              >
+                Create Budget
+              </Button>
+            ) : null}
+          </div>
+        ) : (
+          <SelectField
+            label="Budget"
+            value={budgetId}
+            error={errors.budgetId}
+            hint={
+              selectedBudget
+                ? `Applies ${formatDateRange(selectedBudget.startDate, selectedBudget.endDate)}`
+                : "Two budgets cover this date — pick the one this belongs to."
+            }
+            onChange={(event) => {
+              setBudgetId(event.target.value);
+              setErrors((prev) => ({ ...prev, budgetId: undefined, amount: undefined }));
+            }}
+          >
+            {applicable.length > 1 ? (
+              <option value="">Select a budget…</option>
+            ) : null}
+            {applicable.map((budget) => (
+              <option key={budget.id} value={budget.id}>
+                {budget.name}
+              </option>
+            ))}
+          </SelectField>
+        )}
+
+        {exceedsBalance && selectedBudget ? (
           <div
             role="alert"
             className="rounded-xl border border-danger/30 bg-danger-soft p-3.5"
           >
             <p className="text-sm font-medium text-danger">
-              This is more than you have left.
+              This is more than {selectedBudget.name} has left.
             </p>
             <dl className="mt-2 space-y-1 text-[0.8125rem]">
               <div className="flex items-center justify-between gap-4">
@@ -180,7 +278,7 @@ export function ExpenseFormModal({
               </div>
             </dl>
             <p className="mt-2 text-[0.8125rem] text-muted-strong">
-              Lower the amount, or raise your budget allotment first.
+              Lower the amount, or raise this budget&apos;s allotment first.
             </p>
           </div>
         ) : null}

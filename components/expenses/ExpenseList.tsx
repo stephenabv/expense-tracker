@@ -1,6 +1,6 @@
 "use client";
 
-import { useState } from "react";
+import { useMemo, useState } from "react";
 
 import type { Expense } from "@/types/expense";
 import { useTracker } from "@/components/providers/TrackerProvider";
@@ -10,20 +10,30 @@ import { EmptyState } from "@/components/ui/EmptyState";
 import { EditExpenseModal } from "@/components/expenses/EditExpenseModal";
 import { ExpenseItem } from "@/components/expenses/ExpenseItem";
 import { formatCurrency } from "@/lib/currency";
-import { formatExpenseDate } from "@/lib/utils";
+import { formatDateKey } from "@/lib/dates";
+import { calculateTotalExpenses } from "@/lib/calculations";
 
 export interface ExpenseListProps {
   /** Opens the add-expense flow from the empty state. */
   onAddExpense: () => void;
+  onCreateBudget?: (date: string) => void;
 }
 
-/** The expense history, newest first, with edit and delete affordances. */
-export function ExpenseList({ onAddExpense }: ExpenseListProps) {
-  const { expenses, totals, deleteExpense } = useTracker();
+/** Every recorded expense, newest first, labelled with its budget. */
+export function ExpenseList({ onAddExpense, onCreateBudget }: ExpenseListProps) {
+  const { expenses, budgets, deleteExpense } = useTracker();
   const { showToast } = useToast();
 
   const [editing, setEditing] = useState<Expense | null>(null);
   const [pendingDelete, setPendingDelete] = useState<Expense | null>(null);
+
+  const budgetNames = useMemo(() => {
+    const map = new Map<string, string>();
+    for (const budget of budgets) map.set(budget.id, budget.name);
+    return map;
+  }, [budgets]);
+
+  const total = useMemo(() => calculateTotalExpenses(expenses), [expenses]);
 
   const confirmDelete = () => {
     if (!pendingDelete) return;
@@ -46,8 +56,7 @@ export function ExpenseList({ onAddExpense }: ExpenseListProps) {
         </h2>
         {expenses.length > 0 ? (
           <p className="text-[0.8125rem] text-muted">
-            <span className="tabular">{formatCurrency(totals.totalExpenses)}</span>{" "}
-            total
+            <span className="tabular">{formatCurrency(total)}</span> total
           </p>
         ) : null}
       </div>
@@ -60,6 +69,7 @@ export function ExpenseList({ onAddExpense }: ExpenseListProps) {
             <ExpenseItem
               key={expense.id}
               expense={expense}
+              budgetName={budgetNames.get(expense.budgetId)}
               onEdit={setEditing}
               onDelete={setPendingDelete}
             />
@@ -71,12 +81,13 @@ export function ExpenseList({ onAddExpense }: ExpenseListProps) {
         open={editing !== null}
         expense={editing}
         onClose={() => setEditing(null)}
+        onCreateBudget={onCreateBudget}
       />
 
       <ConfirmDialog
         open={pendingDelete !== null}
         title="Delete this expense?"
-        description="This cannot be undone. Your balance will be recalculated."
+        description="This cannot be undone. Its budget's balance will be recalculated."
         confirmLabel="Delete"
         cancelLabel="Keep it"
         destructive
@@ -94,13 +105,10 @@ export function ExpenseList({ onAddExpense }: ExpenseListProps) {
               </p>
             </div>
             <p className="mt-1 text-[0.8125rem] text-muted">
-              {formatExpenseDate(pendingDelete.createdAt)}
-            </p>
-            <p className="mt-3 border-t border-border-subtle pt-3 text-[0.8125rem] text-muted">
-              Balance after deleting:{" "}
-              <span className="font-medium tabular text-foreground">
-                {formatCurrency(totals.currentBalance + pendingDelete.amount)}
-              </span>
+              {formatDateKey(pendingDelete.expenseDate)}
+              {budgetNames.has(pendingDelete.budgetId)
+                ? ` · ${budgetNames.get(pendingDelete.budgetId)}`
+                : ""}
             </p>
           </div>
         ) : null}

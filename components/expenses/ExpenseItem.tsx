@@ -4,7 +4,7 @@ import { useMemo } from "react";
 
 import type { Expense } from "@/types/expense";
 import { formatCurrency } from "@/lib/currency";
-import { formatExpenseDate, formatFullDate } from "@/lib/utils";
+import { formatShortDateKey } from "@/lib/dates";
 
 function EditIcon() {
   return (
@@ -42,19 +42,25 @@ function DeleteIcon() {
 
 export interface ExpenseItemProps {
   expense: Expense;
+  /** Name of the allotment this expense is charged to. */
+  budgetName?: string;
   onEdit: (expense: Expense) => void;
   onDelete: (expense: Expense) => void;
 }
 
 /** A single row in the expense list. */
-export function ExpenseItem({ expense, onEdit, onDelete }: ExpenseItemProps) {
+export function ExpenseItem({
+  expense,
+  budgetName,
+  onEdit,
+  onDelete,
+}: ExpenseItemProps) {
   const monogram = useMemo(
     () => expense.name.trim().charAt(0).toUpperCase() || "?",
     [expense.name],
   );
 
-  const relative = formatExpenseDate(expense.createdAt);
-  const absolute = formatFullDate(expense.createdAt);
+  const dateLabel = formatShortDateKey(expense.expenseDate);
 
   return (
     <li className="group flex items-center gap-3 px-4 py-3.5 transition-colors duration-150 hover:bg-surface-muted sm:gap-4 sm:px-5">
@@ -69,13 +75,15 @@ export function ExpenseItem({ expense, onEdit, onDelete }: ExpenseItemProps) {
         <p className="truncate text-[0.9375rem] font-medium text-foreground">
           {expense.name}
         </p>
-        <time
-          dateTime={expense.createdAt}
-          title={absolute}
-          className="text-[0.8125rem] text-muted"
-        >
-          {relative}
-        </time>
+        <p className="truncate text-[0.8125rem] text-muted">
+          <time dateTime={expense.expenseDate}>{dateLabel}</time>
+          {budgetName ? (
+            <>
+              {" · "}
+              <span className="text-muted-strong">{budgetName}</span>
+            </>
+          ) : null}
+        </p>
       </div>
 
       <p className="shrink-0 text-[0.9375rem] font-semibold tabular text-foreground">
