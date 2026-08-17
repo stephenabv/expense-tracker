@@ -1,45 +1,50 @@
 # Expense Tracker
 
 A minimalist personal budget and expense tracker built with Next.js, TypeScript
-and Tailwind CSS. Set a budget allotment, record expenses, review your history
-by date, and export it as a PDF — in Philippine Peso.
+and Tailwind CSS. Create budget allotments for different periods, record
+expenses against them, review your history by date, and export it as a PDF —
+in Philippine Peso.
 
-The whole app is built on one rule:
+A **budget allotment** is one independent financial period: its own name, its
+own amount, its own inclusive date range, and its own expenses. It is not a
+label on a shared pot.
 
 ```
-Current Balance = Budget Allotment − Sum(All Expenses)
+Budget Balance = Budget Amount − Sum(That Budget's Expenses)
 ```
 
-The balance is never stored. It is derived from the budget and the expense
-records on every render, so the dashboard can't drift out of sync with the data.
+No balance is ever stored. Every figure is derived from the budgets and the
+expense records on each render, so the screen cannot drift from the data.
 
 ## Features
 
-- **Dashboard** — current balance, budget allotment, total expenses and expense
-  count, with a meter showing how much of the budget is gone.
-- **Locked budget** — once saved, the budget is read-only until you explicitly
-  unlock it. Lowering it below what you've already spent asks for confirmation.
-- **Expense management** — add, edit and delete expenses. Deletions are
-  confirmed first, and every change recalculates the totals.
-- **Overspending protection** — an expense larger than the available balance is
-  blocked, with the shortfall spelled out. Editing an expense measures against
-  the balance excluding that expense, so you're never charged for it twice.
-- **Persistence** — data is saved to `localStorage` and survives a refresh.
-  Corrupted or partially-broken data is repaired rather than crashing the app.
+- **Multiple budget allotments** — as many as you need, each with a custom name,
+  amount and period. A period can be a single day or an inclusive date range.
+- **Independent balances** — each allotment tracks its own spend and remaining
+  balance. Nothing one budget does can move another's numbers.
+- **Date-driven assignment** — an expense's date decides which allotment pays
+  for it. Periods are not allowed to overlap, so that resolution is never a
+  guess; when no budget covers a date the app says so and offers to create one
+  rather than charging an unrelated allotment.
+- **Statuses** — Active, Upcoming, Completed and Over budget, derived from the
+  period and the spending.
+- **Per-budget locking** — a new allotment is locked; unlocking and editing one
+  leaves every other untouched. Completed periods are immutable.
+- **Expense management** — add, edit and delete expenses, each with a name,
+  amount, date and budget. Deletions are confirmed first.
+- **Overspending protection** — an expense larger than *its own* budget's
+  balance is blocked, with the shortfall spelled out.
+- **History** — filterable by a single date or an inclusive range, with presets,
+  grouped by day and labelled with the budget that paid for each day.
+- **PDF export** — a real, paginated document with a per-budget summary and a
+  day-by-day breakdown, containing exactly the days the filter selected.
+- **Persistence** — saved to `localStorage` and migrated forward automatically
+  from earlier single-budget versions. Corrupted data is repaired, not fatal.
 - **Peso formatting** — `Intl.NumberFormat` throughout; money is summed in whole
   centavos so repeated addition never drifts.
-- **History** — a dedicated section for previously recorded days, filterable by
-  a single date or an inclusive date range, with presets (Today, Yesterday, Last
-  7 Days, This Month, Last Month, All Time) and a collapsible daily breakdown.
-- **Immutable snapshots** — each day is sealed once it passes, keeping the
-  budget and balances that were in effect at the time. Changing today's budget
-  or deleting an old expense never rewrites what a past day reported.
-- **PDF export** — a real, paginated PDF document (selectable text, repeated
-  table headers, page numbers), containing exactly the days the active filter
-  selected.
-- **Responsive and accessible** — mobile-first, with a bottom-sheet dialog on
-  phones, keyboard-navigable controls, focus trapping in dialogs, visible focus
-  states and a dark theme that follows the system setting.
+- **Responsive and accessible** — mobile-first, with bottom-sheet dialogs on
+  phones, keyboard-navigable controls, focus trapping, visible focus states and
+  a dark theme that follows the system setting.
 
 ## Tech stack
 
@@ -93,6 +98,7 @@ commit them, and never expose them through a `NEXT_PUBLIC_` variable.
 app/
 ├── layout.tsx          # Root layout, providers, metadata
 ├── page.tsx            # Tracker route
+├── budgets/page.tsx    # Budgets route
 ├── history/page.tsx    # History route
 ├── error.tsx           # Error boundary with a recovery action
 ├── not-found.tsx       # 404
@@ -101,34 +107,40 @@ app/
 
 components/
 ├── dashboard/
-│   ├── Dashboard.tsx        # Composes the screen; picks the right state
-│   ├── BalanceCard.tsx      # Hero metric + spend meter
-│   ├── BudgetCard.tsx       # Budget with lock / unlock / confirm
-│   ├── BudgetSetup.tsx      # First-run budget entry
-│   ├── ExpenseSummary.tsx   # Total expenses + expense count
+│   ├── Dashboard.tsx        # Tracker screen; first-run, loading, active
+│   ├── CurrentBudgetCard.tsx# The allotment covering today
+│   ├── BudgetOverview.tsx   # "Your Budgets" at-a-glance list
 │   └── DashboardSkeleton.tsx
+├── budgets/
+│   ├── BudgetsView.tsx      # Create, review and manage allotments
+│   ├── BudgetCard.tsx       # One allotment's terms and balance
+│   ├── BudgetFormModal.tsx  # Create / edit, with the overlap guard
+│   ├── BudgetDetailModal.tsx
+│   └── BudgetStatusBadge.tsx
 ├── expenses/
 │   ├── ExpenseList.tsx      # List, edit and delete flows
-│   ├── ExpenseItem.tsx      # A single row
-│   ├── ExpenseFormModal.tsx # Shared add/edit form and validation
+│   ├── ExpenseItem.tsx      # A single row, labelled with its budget
+│   ├── ExpenseFormModal.tsx # Name, amount, date, budget + validation
 │   ├── AddExpenseModal.tsx
 │   ├── EditExpenseModal.tsx
 │   └── AddExpenseButton.tsx # Floating action button
 ├── history/
-│   ├── HistoryView.tsx      # History screen; filter → results → export
+│   ├── HistoryView.tsx      # Filter → results → export
 │   ├── HistoryFilterBar.tsx # Presets, single date / range, validation
 │   ├── HistorySummaryCard.tsx
-│   ├── HistoryDayCard.tsx   # Collapsible day with its recorded figures
+│   ├── HistoryDayCard.tsx   # Collapsible day, named by budget
 │   └── ExportPdfButton.tsx  # Loads the PDF code on demand
 ├── layout/
-│   └── AppShell.tsx         # Page frame + Tracker / History navigation
+│   └── AppShell.tsx         # Page frame + Tracker / Budgets / History nav
 ├── providers/
 │   └── TrackerProvider.tsx  # Single source of truth
-└── ui/                      # Button, TextField, DateField, Modal, …
+└── ui/                      # Button, TextField, DateField, SelectField, …
 
 lib/
-├── calculations.ts     # Totals, balance, sorting — all money maths
-├── history.ts          # Day sealing, filtering, summaries, presets
+├── calculations.ts     # Totals, balances, sorting — all money maths
+├── dates.ts            # Calendar-day keys, ranges, overlap detection
+├── budgets.ts          # Status, per-budget summaries, date resolution
+├── history.ts          # Derived day records, filtering, summaries
 ├── validation.ts       # Budget and expense rules
 ├── currency.ts         # Peso formatting, parsing, rounding
 ├── storage.ts          # Repository interface + localStorage implementation
@@ -139,8 +151,9 @@ lib/
 └── __tests__/          # Unit tests
 
 types/
-├── expense.ts          # Tracker domain types
-└── history.ts          # History domain types
+├── budget.ts           # Budget allotment types
+├── expense.ts          # Expense types
+└── history.ts          # History reporting types
 
 scripts/
 └── build-pdf-font.py   # Regenerates lib/pdf/font.ts
@@ -175,72 +188,82 @@ an `allowOverdraft` option (default `false`, via
 `ALLOW_OVERDRAFT_BY_DEFAULT`). Supporting negative balances later means flipping
 that flag rather than reworking the forms.
 
-**History is source data, not a view of the current tracker.** This is the rule
-the whole history feature turns on: *past days are sealed*. The record for today
-is kept in step with the live tracker because the day is still being written, but
-any earlier day is frozen exactly as recorded — with the budget and balances that
-were in effect at the time.
+**Overlapping periods are prevented, not resolved later.** If two allotments
+could claim the same day, every expense on that day becomes a question the app
+has to ask or guess at. The clash is blocked in the budget form — the one moment
+the user can still change the dates cheaply — so expense entry stays unambiguous
+forever after. `findOverlaps` reports which budget clashes and on which days.
 
-Rebuilding history from today's budget would be simpler and wrong: lowering your
-budget would silently rewrite last week's report, and a PDF exported today would
-disagree with the one exported yesterday. So `syncHistory` only ever writes
-today's record and passes every earlier day through untouched. It will *add* a
-record for a past day that has expenses but was never recorded (self-healing),
-but it never overwrites one.
+**Completed budgets are immutable, and that is what guarantees history.** Once a
+period has ended its amount, dates and name are frozen. Any report over past
+dates is therefore reproducible from source data, so History is *derived* rather
+than stored.
 
-A day is recorded only once something is spent on it. Inventing an empty record
-would turn "no activity" into a misleading row of zeroes.
+This replaced an earlier design that stored sealed daily snapshots. Snapshots
+existed because a single global budget could be edited and silently rewrite last
+week's report; with date-bounded, immutable periods that risk is gone. Deriving
+also fixes a bug snapshots would have introduced here: expenses now carry a
+user-settable date, and a back-dated expense must appear in the day it is dated
+for — a frozen day record would have hidden it.
 
-**Summaries do not add up what should not be added.** Expenses are summed across
-the period; budgets and balances are point-in-time values, so the starting
-figures come from the earliest day in range and the ending balance from the
-latest — both read from the snapshots rather than recomputed.
+Editing an *active* budget's amount does change that allotment's own figures.
+That is intended, and the form asks for confirmation when the budget already has
+expenses. Narrowing a period so that recorded expenses would fall outside it is
+refused outright, since an expense must always sit inside the allotment paying
+for it.
+
+**Renaming is safe.** Expenses reference `budgetId`, never the name, so a rename
+cannot break an association or a historical record.
+
+**Summaries do not add up what should not be added.** Within one budget, the
+balance is a point-in-time value and is never summed across days: the per-budget
+`remaining` is the balance as of the last day in range. Across budgets, those
+independent pots *are* summed, because separate allotments really do add up to a
+total allocated and a total remaining.
 
 ## Stored data
 
 ```jsonc
 {
-  "version": 2,
-  "budget": 13000,
-  "expenses": [
+  "version": 3,
+  "budgets": [
     {
       "id": "b1e7…",
-      "name": "Food",
-      "amount": 500,
-      "createdAt": "2026-08-17T04:30:00.000Z"
+      "name": "August Week 1",
+      "amount": 5000,
+      "startDate": "2026-08-01",   // inclusive
+      "endDate": "2026-08-05",     // inclusive; equals startDate for one day
+      "createdAt": "2026-08-01T02:00:00.000Z",
+      "updatedAt": "2026-08-01T02:00:00.000Z",
+      "locked": true
     }
   ],
-  // Sealed daily snapshots — the source of truth for History.
-  "history": [
+  "expenses": [
     {
-      "date": "2026-08-17",
-      "budget": 13000,
-      "startingBalance": 13000,
-      "endingBalance": 12500,
-      "totalExpenses": 500,
-      "expenses": [
-        {
-          "id": "b1e7…",
-          "name": "Food",
-          "amount": 500,
-          "createdAt": "2026-08-17T04:30:00.000Z"
-        }
-      ]
+      "id": "9f2c…",
+      "budgetId": "b1e7…",         // by id, so renaming is safe
+      "name": "Food",
+      "amount": 500,
+      "expenseDate": "2026-08-01", // decides which budget applies
+      "createdAt": "2026-08-01T04:30:00.000Z",
+      "updatedAt": "2026-08-01T04:30:00.000Z"
     }
   ]
 }
 ```
 
-Stored under the key `expense-tracker:v2`. On load the payload is validated
-field by field: malformed JSON falls back to an empty state, and individual bad
-records are dropped or repaired so one bad entry can't break the app. Recorded
-budgets and balances are trusted as written — that is the point of a snapshot —
-but a missing figure is rebuilt from that record's own expenses.
+Stored under the key `expense-tracker:v3`. Only source data is persisted —
+balances, statuses and the whole of History are derived on demand.
 
-A `v1` payload (tracker only, no history) is migrated automatically on first
-load: history is reconstructed from the expenses that exist, using the only
-budget on record. Those days then seal normally, so the approximation happens
-once and never drifts.
+On load the payload is validated field by field: malformed JSON falls back to an
+empty state, a budget with no usable period is dropped, a reversed period is
+repaired, and an expense pointing at a budget that no longer exists is discarded
+rather than left with no balance to belong to.
+
+A `v1` or `v2` payload (one global budget, no periods) is migrated on first
+load into a single allotment named **Original Budget**, spanning the days the
+old tracker covered and staying open through today. Every existing expense is
+attached to it. Rename or re-scope it like any other budget.
 
 ## Testing
 
@@ -248,11 +271,14 @@ once and never drifts.
 npm test
 ```
 
-The suite covers the calculation, currency, validation, history and PDF layers —
-the core rule, rounding across many fractional amounts, zero and negative
-budgets, the overdraft check, recovery from corrupted or partially-broken saved
-data, single-day and inclusive-range filtering, invalid ranges, the immutability
-of sealed days, and PDF generation including pagination of large datasets.
+The suite covers the date, budget, calculation, currency, validation, history
+and PDF layers — per-budget balances and their independence from one another,
+statuses, overlap detection including shared endpoints, single-day and
+inclusive-range periods, date-to-budget resolution (and the refusal to resolve
+when several budgets match), rounding across many fractional amounts, the
+overdraft check, migration from the single-budget formats, recovery from
+corrupted data, filtering, and PDF generation including pagination of large
+datasets.
 
 ### Regenerating the PDF font
 
