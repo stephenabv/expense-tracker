@@ -1,109 +1,224 @@
 import { describe, expect, it } from "vitest";
 
-import type { Expense, TrackerState } from "@/types/expense";
-import type { HistoryDay } from "@/types/history";
 import {
-  backfillHistory,
+  buildHistory,
+  budgetsInFilter,
   describeFilter,
   filterHistory,
-  formatDateKey,
-  fromDateKey,
-  groupExpensesByDate,
+  historyForFilter,
   matchesFilter,
   presetToFilter,
   summarizeHistory,
-  syncHistory,
-  toDateKey,
   validateFilter,
 } from "@/lib/history";
+import { budget, expense } from "./helpers";
 
-/** Builds an expense at a local wall-clock time, avoiding UTC drift in tests. */
-function expense(
-  id: string,
-  name: string,
-  amount: number,
-  local: string,
-): Expense {
-  return { id, name, amount, createdAt: new Date(local).toISOString() };
-}
+const week1 = budget("b1", "August Week 1", 5_000, "2026-08-01", "2026-08-05");
+const daily = budget("b2", "Daily Expenses", 1_000, "2026-08-06");
+const weekend = budget("b3", "Weekend Budget", 3_000, "2026-08-07", "2026-08-09");
 
-function day(date: string, overrides: Partial<HistoryDay> = {}): HistoryDay {
-  return {
-    date,
-    budget: 1_000,
-    startingBalance: 1_000,
-    endingBalance: 900,
-    totalExpenses: 100,
-    expenses: [],
-    ...overrides,
-  };
-}
+const budgets = [week1, daily, weekend];
 
-describe("toDateKey / fromDateKey", () => {
-  it("uses the local calendar day, not UTC", () => {
-    // Late evening local time must not roll into the next UTC day.
-    expect(toDateKey(new Date(2026, 7, 17, 23, 30))).toBe("2026-08-17");
-    expect(toDateKey(new Date(2026, 7, 17, 0, 15))).toBe("2026-08-17");
+const expenses = [
+  expense("e1", "b1", "Food", 500, "2026-08-01"),
+  expense("e2", "b1", "Transportation", 300, "2026-08-02"),
+  expense("e3", "b1", "Groceries", 1_500, "2026-08-05"),
+  expense("e4", "b2", "Coffee", 100, "2026-08-06"),
+  expense("e5", "b2", "Food", 300, "2026-08-06"),
+];
+
+describe("buildHistory", () => {
+  it("records one entry per day per budget, oldest first", () => {
+    const days = buildHistory(budgets, expenses);
+    expect(days.map((day) => day.date)).toEqual([
+      "2026-08-01",
+      "2026-08-02",
+      "2026-08-05",
+      "2026-08-06",
+    ]);
   });
 
-  it("zero-pads months and days", () => {
-    expect(toDateKey(new Date(2026, 0, 5))).toBe("2026-01-05");
+  it("attributes each day to the budget that paid for it", () => {
+    const days = buildHistory(budgets, expenses);
+    expect(days[0].budgetName).toBe("August Week 1");
+    expect(days[3].budgetName).toBe("Daily Expenses");
   });
 
-  it("returns an empty key for an unparseable date", () => {
-    expect(toDateKey("not a date")).toBe("");
+  it("records the daily total, not the running total", () => {
+    const days = buildHistory(budgets, expenses);
+    expect(days[0].totalExpenses).toBe(500);
+    expect(days[3].totalExpenses).toBe(400);
   });
 
-  it("round-trips through fromDateKey", () => {
-    expect(toDateKey(fromDateKey("2026-08-17")!)).toBe("2026-08-17");
+  it("chains balances within a budget", () => {
+    const days = buildHistory(budgets, expenses).filter((d) => d.budgetId === "b1");
+    expect(days[0].startingBalance).toBe(5_000);
+    expect(days[0].endingBalance).toBe(4_500);
+    expect(days[1].startingBalance).toBe(4_500);
+    expect(days[1].endingBalance).toBe(4_200);
+    expect(days[2].endingBalance).toBe(2_700);
   });
 
-  it("rejects malformed keys", () => {
-    expect(fromDateKey("2026-8-17")).toBeNull();
-    expect(fromDateKey("nope")).toBeNull();
+  it("restarts the balance for each budget rather than carrying it over", () => {
+    // The Daily budget opens at its own 1,000, not at Week 1's leftover.
+    const day = buildHistory(budgets, expenses).find((d) => d.budgetId === "b2")!;
+    expect(day.startingBalance).toBe(1_000);
+    expect(day.endingBalance).toBe(600);
+  });
+
+  it("skips budgets with no expenses", () => {
+    const days = buildHistory(budgets, expenses);
+    expect(days.some((day) => day.budgetId === "b3")).toBe(false);
+  });
+
+  it("groups several expenses recorded on the same day", () => {
+    const day = buildHistory(budgets, expenses).find((d) => d.date === "2026-08-06")!;
+    expect(day.expenses).toHaveLength(2);
+  });
+
+  it("returns nothing when there is no data", () => {
+    expect(buildHistory([], [])).toEqual([]);
+    expect(buildHistory(budgets, [])).toEqual([]);
+  });
+
+  it("includes a back-dated expense in the day it is dated for", () => {
+    const backdated = expense("late", "b1", "Forgotten", 200, "2026-08-03", "2026-08-20T09:00:00.000Z");
+    const days = buildHistory(budgets, [...expenses, backdated]);
+    const day = days.find((d) => d.date === "2026-08-03");
+    expect(day).toBeDefined();
+    expect(day!.expenses[0].name).toBe("Forgotten");
   });
 });
 
-describe("formatDateKey / describeFilter", () => {
-  it("formats a key as a long date", () => {
-    expect(formatDateKey("2026-08-17")).toBe("August 17, 2026");
+describe("filterHistory", () => {
+  const days = buildHistory(budgets, expenses);
+
+  it("returns a single day", () => {
+    const result = filterHistory(days, { mode: "single", date: "2026-08-02" });
+    expect(result).toHaveLength(1);
+    expect(result[0].date).toBe("2026-08-02");
   });
 
-  it("describes a single date", () => {
-    expect(describeFilter({ mode: "single", date: "2026-08-17" })).toBe(
-      "August 17, 2026",
+  it("returns nothing for a day with no record", () => {
+    expect(filterHistory(days, { mode: "single", date: "2026-08-03" })).toEqual([]);
+  });
+
+  it("includes both ends of a range", () => {
+    const result = filterHistory(days, {
+      mode: "range",
+      start: "2026-08-01",
+      end: "2026-08-06",
+    });
+    expect(result).toHaveLength(4);
+  });
+
+  it("excludes days outside the range", () => {
+    const result = filterHistory(days, {
+      mode: "range",
+      start: "2026-08-02",
+      end: "2026-08-05",
+    });
+    expect(result.map((day) => day.date)).toEqual(["2026-08-05", "2026-08-02"]);
+  });
+
+  it("returns newest first", () => {
+    const result = filterHistory(days, { mode: "all" });
+    expect(result[0].date).toBe("2026-08-06");
+  });
+
+  it("returns nothing from an empty history", () => {
+    expect(filterHistory([], { mode: "all" })).toEqual([]);
+  });
+});
+
+describe("summarizeHistory", () => {
+  const all = historyForFilter(budgets, expenses, { mode: "all" });
+
+  it("sums expenses across the period", () => {
+    expect(summarizeHistory(all).totalExpenses).toBe(2_700);
+  });
+
+  it("adds up the allotments of the budgets in range", () => {
+    // Week 1 (5,000) and Daily (1,000); the untouched weekend budget is absent.
+    expect(summarizeHistory(all).totalAllocated).toBe(6_000);
+  });
+
+  it("adds up each budget's own remaining balance", () => {
+    // Week 1 has 2,700 left and Daily has 600.
+    expect(summarizeHistory(all).totalRemaining).toBe(3_300);
+  });
+
+  it("counts budgets, expenses and distinct active days", () => {
+    const summary = summarizeHistory(all);
+    expect(summary.budgetCount).toBe(2);
+    expect(summary.expenseCount).toBe(5);
+    expect(summary.activeDays).toBe(4);
+  });
+
+  it("breaks the period down per budget", () => {
+    const summary = summarizeHistory(all);
+    const week = summary.budgets.find((entry) => entry.budgetId === "b1")!;
+
+    expect(week.budgetName).toBe("August Week 1");
+    expect(week.budgetAmount).toBe(5_000);
+    expect(week.totalExpenses).toBe(2_300);
+    expect(week.remaining).toBe(2_700);
+    expect(week.activeDays).toBe(3);
+  });
+
+  it("reports remaining as of the last in-range day, not the whole budget", () => {
+    // Filtering to Aug 1–2 covers only 800 of Week 1's spending, so the
+    // balance reported is the one that stood at the end of Aug 2.
+    const partial = historyForFilter(budgets, expenses, {
+      mode: "range",
+      start: "2026-08-01",
+      end: "2026-08-02",
+    });
+    const summary = summarizeHistory(partial);
+    expect(summary.budgets[0].totalExpenses).toBe(800);
+    expect(summary.budgets[0].remaining).toBe(4_200);
+  });
+
+  it("keeps one budget's figures out of another's", () => {
+    const summary = summarizeHistory(all);
+    const week = summary.budgets.find((e) => e.budgetId === "b1")!;
+    const day = summary.budgets.find((e) => e.budgetId === "b2")!;
+    expect(week.remaining).toBe(2_700);
+    expect(day.remaining).toBe(600);
+  });
+
+  it("returns zeroes for an empty selection", () => {
+    const summary = summarizeHistory([]);
+    expect(summary.totalExpenses).toBe(0);
+    expect(summary.budgetCount).toBe(0);
+    expect(summary.firstDate).toBeNull();
+    expect(summary.budgets).toEqual([]);
+  });
+
+  it("is order-independent", () => {
+    const shuffled = [...all].reverse();
+    expect(summarizeHistory(shuffled)).toEqual(summarizeHistory(all));
+  });
+
+  it("stays exact across many fractional amounts", () => {
+    const many = Array.from({ length: 10 }, (_, i) =>
+      expense(`f${i}`, "b2", "Coffee", 0.1, "2026-08-06"),
     );
-  });
-
-  it("describes a range within one year without repeating it", () => {
-    expect(
-      describeFilter({ mode: "range", start: "2026-08-01", end: "2026-08-17" }),
-    ).toBe("August 1 – August 17, 2026");
-  });
-
-  it("keeps both years when a range spans them", () => {
-    expect(
-      describeFilter({ mode: "range", start: "2025-12-30", end: "2026-01-02" }),
-    ).toBe("December 30, 2025 – January 2, 2026");
-  });
-
-  it("collapses a single-day range", () => {
-    expect(
-      describeFilter({ mode: "range", start: "2026-08-17", end: "2026-08-17" }),
-    ).toBe("August 17, 2026");
+    const days = buildHistory([daily], many);
+    expect(summarizeHistory(days).totalExpenses).toBe(1);
   });
 });
 
 describe("validateFilter", () => {
-  it("accepts a valid single date and range", () => {
+  it("accepts valid filters", () => {
+    expect(validateFilter({ mode: "all" })).toBeNull();
     expect(validateFilter({ mode: "single", date: "2026-08-17" })).toBeNull();
     expect(
       validateFilter({ mode: "range", start: "2026-08-01", end: "2026-08-17" }),
     ).toBeNull();
-    expect(validateFilter({ mode: "all" })).toBeNull();
   });
 
-  it("accepts a range whose ends are the same day", () => {
+  it("accepts a range whose ends match", () => {
     expect(
       validateFilter({ mode: "range", start: "2026-08-17", end: "2026-08-17" }),
     ).toBeNull();
@@ -128,348 +243,18 @@ describe("matchesFilter", () => {
     const filter = { mode: "range", start: "2026-08-01", end: "2026-08-17" } as const;
     expect(matchesFilter("2026-08-01", filter)).toBe(true);
     expect(matchesFilter("2026-08-17", filter)).toBe(true);
-    expect(matchesFilter("2026-08-09", filter)).toBe(true);
-  });
-
-  it("excludes days outside the range", () => {
-    const filter = { mode: "range", start: "2026-08-01", end: "2026-08-17" } as const;
     expect(matchesFilter("2026-07-31", filter)).toBe(false);
     expect(matchesFilter("2026-08-18", filter)).toBe(false);
   });
-
-  it("matches only the chosen day for a single filter", () => {
-    const filter = { mode: "single", date: "2026-08-17" } as const;
-    expect(matchesFilter("2026-08-17", filter)).toBe(true);
-    expect(matchesFilter("2026-08-16", filter)).toBe(false);
-  });
-
-  it("matches everything for the all filter", () => {
-    expect(matchesFilter("1999-01-01", { mode: "all" })).toBe(true);
-  });
 });
 
-describe("groupExpensesByDate", () => {
-  it("groups multiple expenses recorded on the same day", () => {
-    const groups = groupExpensesByDate([
-      expense("1", "Food", 500, "2026-08-17T08:00:00"),
-      expense("2", "Coffee", 150, "2026-08-17T16:00:00"),
-      expense("3", "Taxi", 300, "2026-08-16T09:00:00"),
-    ]);
-
-    expect(groups.get("2026-08-17")).toHaveLength(2);
-    expect(groups.get("2026-08-16")).toHaveLength(1);
-  });
-
-  it("skips expenses with an unusable timestamp", () => {
-    const groups = groupExpensesByDate([
-      { id: "x", name: "Broken", amount: 10, createdAt: "nonsense" },
-    ]);
-    expect(groups.size).toBe(0);
-  });
-});
-
-describe("backfillHistory", () => {
-  const now = new Date(2026, 7, 17, 12, 0);
-
-  const state: TrackerState = {
-    budget: 13_000,
-    expenses: [
-      expense("1", "Food", 500, "2026-08-16T08:00:00"),
-      expense("2", "Taxi", 300, "2026-08-17T09:00:00"),
-      expense("3", "Coffee", 150, "2026-08-17T16:00:00"),
-    ],
-  };
-
-  it("creates one record per active day, oldest first", () => {
-    const history = backfillHistory(state, now);
-    expect(history.map((entry) => entry.date)).toEqual([
-      "2026-08-16",
-      "2026-08-17",
-    ]);
-  });
-
-  it("records the daily total, not the running total", () => {
-    const history = backfillHistory(state, now);
-    expect(history[0].totalExpenses).toBe(500);
-    expect(history[1].totalExpenses).toBe(450);
-  });
-
-  it("chains balances across days", () => {
-    const history = backfillHistory(state, now);
-    expect(history[0].startingBalance).toBe(13_000);
-    expect(history[0].endingBalance).toBe(12_500);
-    expect(history[1].startingBalance).toBe(12_500);
-    expect(history[1].endingBalance).toBe(12_050);
-  });
-
-  it("ignores future-dated expenses", () => {
-    const history = backfillHistory(
-      {
-        budget: 100,
-        expenses: [expense("f", "Later", 10, "2026-08-20T09:00:00")],
-      },
-      now,
-    );
-    expect(history).toHaveLength(0);
-  });
-
-  it("returns nothing for an empty tracker", () => {
-    expect(backfillHistory({ budget: null, expenses: [] }, now)).toEqual([]);
-  });
-});
-
-describe("syncHistory", () => {
-  const now = new Date(2026, 7, 17, 12, 0);
-
-  it("records today once something is spent", () => {
-    const history = syncHistory(
-      [],
-      {
-        budget: 1_000,
-        expenses: [expense("1", "Food", 200, "2026-08-17T08:00:00")],
-      },
-      now,
-    );
-
-    expect(history).toHaveLength(1);
-    expect(history[0].date).toBe("2026-08-17");
-    expect(history[0].totalExpenses).toBe(200);
-    expect(history[0].endingBalance).toBe(800);
-  });
-
-  it("does not invent an empty record for a day with no expenses", () => {
-    expect(syncHistory([], { budget: 1_000, expenses: [] }, now)).toEqual([]);
-  });
-
-  it("keeps today's record in step with the live tracker", () => {
-    const first = syncHistory(
-      [],
-      {
-        budget: 1_000,
-        expenses: [expense("1", "Food", 200, "2026-08-17T08:00:00")],
-      },
-      now,
-    );
-
-    const second = syncHistory(
-      first,
-      {
-        budget: 1_000,
-        expenses: [
-          expense("1", "Food", 200, "2026-08-17T08:00:00"),
-          expense("2", "Taxi", 100, "2026-08-17T10:00:00"),
-        ],
-      },
-      now,
-    );
-
-    expect(second).toHaveLength(1);
-    expect(second[0].totalExpenses).toBe(300);
-    expect(second[0].endingBalance).toBe(700);
-  });
-
-  it("leaves a past day untouched when the budget changes", () => {
-    const sealed = day("2026-08-16", {
-      budget: 13_000,
-      startingBalance: 13_000,
-      endingBalance: 12_500,
-      totalExpenses: 500,
-      expenses: [expense("1", "Food", 500, "2026-08-16T08:00:00")],
-    });
-
-    // The user later slashes the budget to 1,000.
-    const history = syncHistory(
-      [sealed],
-      {
-        budget: 1_000,
-        expenses: [expense("1", "Food", 500, "2026-08-16T08:00:00")],
-      },
-      now,
-    );
-
-    const yesterday = history.find((entry) => entry.date === "2026-08-16")!;
-    expect(yesterday.budget).toBe(13_000);
-    expect(yesterday.endingBalance).toBe(12_500);
-  });
-
-  it("leaves a past day untouched when its expense is deleted today", () => {
-    const sealed = day("2026-08-16", {
-      budget: 13_000,
-      startingBalance: 13_000,
-      endingBalance: 12_500,
-      totalExpenses: 500,
-      expenses: [expense("1", "Food", 500, "2026-08-16T08:00:00")],
-    });
-
-    const history = syncHistory([sealed], { budget: 13_000, expenses: [] }, now);
-
-    expect(history).toHaveLength(1);
-    expect(history[0].totalExpenses).toBe(500);
-    expect(history[0].expenses).toHaveLength(1);
-  });
-
-  it("does not mutate the frozen expense copies when the live expense changes", () => {
-    const live = expense("1", "Food", 500, "2026-08-17T08:00:00");
-    const history = syncHistory([], { budget: 1_000, expenses: [live] }, now);
-
-    live.name = "Renamed";
-    live.amount = 9_999;
-
-    expect(history[0].expenses[0].name).toBe("Food");
-    expect(history[0].expenses[0].amount).toBe(500);
-  });
-
-  it("backfills a past day that has expenses but no record", () => {
-    const history = syncHistory(
-      [],
-      {
-        budget: 1_000,
-        expenses: [
-          expense("1", "Food", 200, "2026-08-15T08:00:00"),
-          expense("2", "Taxi", 100, "2026-08-17T08:00:00"),
-        ],
-      },
-      now,
-    );
-
-    expect(history.map((entry) => entry.date)).toEqual([
-      "2026-08-15",
-      "2026-08-17",
-    ]);
-  });
-
-  it("never overwrites an existing sealed record while backfilling", () => {
-    const sealed = day("2026-08-15", {
-      budget: 500,
-      totalExpenses: 42,
-      startingBalance: 500,
-      endingBalance: 458,
-    });
-
-    const history = syncHistory(
-      [sealed],
-      {
-        budget: 1_000,
-        expenses: [expense("1", "Food", 200, "2026-08-15T08:00:00")],
-      },
-      now,
-    );
-
-    expect(history[0].totalExpenses).toBe(42);
-    expect(history[0].budget).toBe(500);
-  });
-});
-
-describe("filterHistory", () => {
-  const history = [
-    day("2026-08-15", { totalExpenses: 100 }),
-    day("2026-08-16", { totalExpenses: 200 }),
-    day("2026-08-17", { totalExpenses: 300 }),
-  ];
-
-  it("returns a single day", () => {
-    const result = filterHistory(history, { mode: "single", date: "2026-08-16" });
-    expect(result).toHaveLength(1);
-    expect(result[0].date).toBe("2026-08-16");
-  });
-
-  it("returns nothing for a day with no record", () => {
-    expect(filterHistory(history, { mode: "single", date: "2026-08-18" })).toEqual([]);
-  });
-
-  it("includes both ends of a range", () => {
-    const result = filterHistory(history, {
-      mode: "range",
-      start: "2026-08-15",
-      end: "2026-08-17",
-    });
-    expect(result).toHaveLength(3);
-  });
-
-  it("returns newest first", () => {
-    const result = filterHistory(history, { mode: "all" });
-    expect(result.map((entry) => entry.date)).toEqual([
-      "2026-08-17",
-      "2026-08-16",
-      "2026-08-15",
-    ]);
-  });
-
-  it("returns nothing from an empty history", () => {
-    expect(filterHistory([], { mode: "all" })).toEqual([]);
-  });
-});
-
-describe("summarizeHistory", () => {
-  const history = [
-    day("2026-08-15", {
-      budget: 13_000,
-      startingBalance: 13_000,
-      endingBalance: 12_500,
-      totalExpenses: 500,
-      expenses: [expense("1", "Food", 500, "2026-08-15T08:00:00")],
-    }),
-    day("2026-08-16", {
-      budget: 13_000,
-      startingBalance: 12_500,
-      endingBalance: 12_200,
-      totalExpenses: 300,
-      expenses: [expense("2", "Taxi", 300, "2026-08-16T08:00:00")],
-    }),
-    day("2026-08-17", {
-      budget: 15_000,
-      startingBalance: 14_200,
-      endingBalance: 14_050,
-      totalExpenses: 150,
-      expenses: [expense("3", "Coffee", 150, "2026-08-17T08:00:00")],
-    }),
-  ];
-
-  it("sums only the daily expense totals", () => {
-    expect(summarizeHistory(history).totalExpenses).toBe(950);
-  });
-
-  it("takes the starting figures from the earliest day", () => {
-    const summary = summarizeHistory(history);
-    expect(summary.startingBudget).toBe(13_000);
-    expect(summary.startingBalance).toBe(13_000);
-  });
-
-  it("takes the ending balance from the latest day rather than recomputing it", () => {
-    // 13,000 - 950 would be 12,050; the recorded value reflects the later
-    // budget change and is the one that must be reported.
-    expect(summarizeHistory(history).endingBalance).toBe(14_050);
-  });
-
-  it("counts expenses and active days", () => {
-    const summary = summarizeHistory(history);
-    expect(summary.expenseCount).toBe(3);
-    expect(summary.activeDays).toBe(3);
-  });
-
-  it("reports the range covered", () => {
-    const summary = summarizeHistory(history);
-    expect(summary.firstDate).toBe("2026-08-15");
-    expect(summary.lastDate).toBe("2026-08-17");
-  });
-
-  it("is order-independent", () => {
-    const shuffled = [history[2], history[0], history[1]];
-    expect(summarizeHistory(shuffled)).toEqual(summarizeHistory(history));
-  });
-
-  it("returns zeroes and null dates for an empty selection", () => {
-    const summary = summarizeHistory([]);
-    expect(summary.totalExpenses).toBe(0);
-    expect(summary.activeDays).toBe(0);
-    expect(summary.firstDate).toBeNull();
-  });
-
-  it("stays exact across many fractional daily totals", () => {
-    const days = Array.from({ length: 10 }, (_, index) =>
-      day(`2026-08-${String(index + 1).padStart(2, "0")}`, { totalExpenses: 0.1 }),
-    );
-    expect(summarizeHistory(days).totalExpenses).toBe(1);
+describe("describeFilter", () => {
+  it("labels each mode", () => {
+    expect(describeFilter({ mode: "all" })).toBe("All recorded history");
+    expect(describeFilter({ mode: "single", date: "2026-08-17" })).toBe("August 17, 2026");
+    expect(
+      describeFilter({ mode: "range", start: "2026-08-01", end: "2026-08-17" }),
+    ).toBe("August 1 – August 17, 2026");
   });
 });
 
@@ -477,14 +262,8 @@ describe("presetToFilter", () => {
   const now = new Date(2026, 7, 17, 12, 0);
 
   it("resolves today and yesterday", () => {
-    expect(presetToFilter("today", now)).toEqual({
-      mode: "single",
-      date: "2026-08-17",
-    });
-    expect(presetToFilter("yesterday", now)).toEqual({
-      mode: "single",
-      date: "2026-08-16",
-    });
+    expect(presetToFilter("today", now)).toEqual({ mode: "single", date: "2026-08-17" });
+    expect(presetToFilter("yesterday", now)).toEqual({ mode: "single", date: "2026-08-16" });
   });
 
   it("makes last 7 days inclusive of today", () => {
@@ -495,15 +274,12 @@ describe("presetToFilter", () => {
     });
   });
 
-  it("resolves this month up to today", () => {
+  it("resolves this month and last month", () => {
     expect(presetToFilter("thisMonth", now)).toEqual({
       mode: "range",
       start: "2026-08-01",
       end: "2026-08-17",
     });
-  });
-
-  it("resolves last month to its full span", () => {
     expect(presetToFilter("lastMonth", now)).toEqual({
       mode: "range",
       start: "2026-07-01",
@@ -518,8 +294,20 @@ describe("presetToFilter", () => {
       end: "2025-12-31",
     });
   });
+});
 
-  it("resolves all", () => {
-    expect(presetToFilter("all", now)).toEqual({ mode: "all" });
+describe("budgetsInFilter", () => {
+  it("returns budgets whose period intersects the range", () => {
+    const result = budgetsInFilter(budgets, {
+      mode: "range",
+      start: "2026-08-05",
+      end: "2026-08-07",
+    });
+    expect(result.map((b) => b.id).sort()).toEqual(["b1", "b2", "b3"]);
+  });
+
+  it("excludes budgets outside the range", () => {
+    const result = budgetsInFilter(budgets, { mode: "single", date: "2026-08-06" });
+    expect(result.map((b) => b.id)).toEqual(["b2"]);
   });
 });

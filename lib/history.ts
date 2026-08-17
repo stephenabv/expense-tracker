@@ -1,83 +1,41 @@
 /**
- * Historical tracker logic.
+ * Historical reporting.
  *
- * The rule that shapes this whole module: **past days are sealed.** The record
- * for today is kept in step with the live tracker because the day is still being
- * written, but any earlier day is frozen exactly as it was recorded. Changing
- * today's budget, or deleting an expense from last week, must never alter what a
- * past day reported — otherwise an exported report would silently disagree with
- * the one printed yesterday.
+ * History is derived from budgets and expenses on demand — see
+ * `types/history.ts` for why that is safe now that completed budgets are
+ * immutable.
+ *
+ * Balances chain *within* a budget, never across budgets: each allotment is its
+ * own pot, so spending in one never moves another's running balance.
  */
 
-import type { Expense, TrackerState } from "@/types/expense";
+import type { Budget } from "@/types/budget";
+import type { Expense } from "@/types/expense";
 import type {
-  DateKey,
+  HistoryBudgetSummary,
   HistoryDay,
   HistoryFilter,
   HistoryPreset,
   HistorySummary,
 } from "@/types/history";
+import {
+  formatDateKey,
+  formatDateRange,
+  isValidDateKey,
+  toDateKey,
+  type DateKey,
+} from "@/lib/dates";
 import { roundCurrency } from "@/lib/currency";
-import { calculateTotalExpenses, sortExpensesByNewest } from "@/lib/calculations";
+import { calculateTotalExpenses, sortExpensesByNewest, sumAmounts } from "@/lib/calculations";
+import { expensesForBudget, sortBudgetsByPeriod } from "@/lib/budgets";
 
-/** Formats a date as a local `YYYY-MM-DD` key (never UTC — days are local). */
-export function toDateKey(value: Date | string): DateKey {
-  const date = value instanceof Date ? value : new Date(value);
-  if (Number.isNaN(date.getTime())) return "";
-
-  const year = date.getFullYear();
-  const month = `${date.getMonth() + 1}`.padStart(2, "0");
-  const day = `${date.getDate()}`.padStart(2, "0");
-  return `${year}-${month}-${day}`;
-}
-
-/** Parses a `YYYY-MM-DD` key into a local Date at midnight. */
-export function fromDateKey(key: DateKey): Date | null {
-  const match = /^(\d{4})-(\d{2})-(\d{2})$/.exec(key);
-  if (!match) return null;
-
-  const [, year, month, day] = match;
-  const date = new Date(Number(year), Number(month) - 1, Number(day));
-  return Number.isNaN(date.getTime()) ? null : date;
-}
-
-export function isValidDateKey(key: unknown): key is DateKey {
-  return typeof key === "string" && fromDateKey(key) !== null;
-}
-
-const longDateFormatter = new Intl.DateTimeFormat("en-PH", {
-  month: "long",
-  day: "numeric",
-  year: "numeric",
-});
-
-/** `August 17, 2026`. */
-export function formatDateKey(key: DateKey): string {
-  const date = fromDateKey(key);
-  return date ? longDateFormatter.format(date) : key;
-}
+/* ------------------------------------------------------------------ filters */
 
 /** Human label for a filter, e.g. `August 1 – August 17, 2026`. */
 export function describeFilter(filter: HistoryFilter): string {
   if (filter.mode === "all") return "All recorded history";
   if (filter.mode === "single") return formatDateKey(filter.date);
-
-  if (filter.start === filter.end) return formatDateKey(filter.start);
-
-  const start = fromDateKey(filter.start);
-  const end = fromDateKey(filter.end);
-  if (!start || !end) return `${filter.start} – ${filter.end}`;
-
-  // Drop the repeated year when both ends share it.
-  if (start.getFullYear() === end.getFullYear()) {
-    const startLabel = new Intl.DateTimeFormat("en-PH", {
-      month: "long",
-      day: "numeric",
-    }).format(start);
-    return `${startLabel} – ${longDateFormatter.format(end)}`;
-  }
-
-  return `${longDateFormatter.format(start)} – ${longDateFormatter.format(end)}`;
+  return formatDateRange(filter.start, filter.end);
 }
 
 /** Validates a filter. Returns an error message, or `null` when it is usable. */
@@ -92,7 +50,7 @@ export function validateFilter(filter: HistoryFilter): string | null {
     return "Choose a valid start and end date.";
   }
 
-  // Keys are zero-padded, so lexicographic order matches chronological order.
+  // Keys are zero-padded, so lexicographic order is chronological order.
   if (filter.start > filter.end) {
     return "The start date must be on or before the end date.";
   }
@@ -105,184 +63,6 @@ export function matchesFilter(date: DateKey, filter: HistoryFilter): boolean {
   if (filter.mode === "all") return true;
   if (filter.mode === "single") return date === filter.date;
   return date >= filter.start && date <= filter.end;
-}
-
-/** Groups expenses by the local calendar day they were recorded. */
-export function groupExpensesByDate(
-  expenses: Expense[],
-): Map<DateKey, Expense[]> {
-  const groups = new Map<DateKey, Expense[]>();
-
-  for (const expense of expenses) {
-    const key = toDateKey(expense.createdAt);
-    if (!key) continue;
-
-    const bucket = groups.get(key);
-    if (bucket) bucket.push(expense);
-    else groups.set(key, [expense]);
-  }
-
-  return groups;
-}
-
-/**
- * Builds the record for a single day from the live tracker.
- *
- * `endingBalance` counts every expense up to and including that day, matching
- * the tracker's core rule; `startingBalance` is what was left before the day's
- * own spending.
- */
-function buildDayRecord(
-  date: DateKey,
-  budget: number,
-  dayExpenses: Expense[],
-  expensesUpToDate: Expense[],
-): HistoryDay {
-  const totalExpenses = calculateTotalExpenses(dayExpenses);
-  const endingBalance = roundCurrency(
-    budget - calculateTotalExpenses(expensesUpToDate),
-  );
-
-  return {
-    date,
-    budget: roundCurrency(budget),
-    startingBalance: roundCurrency(endingBalance + totalExpenses),
-    endingBalance,
-    totalExpenses,
-    // Frozen copies — later edits to the live expense must not reach in here.
-    expenses: sortExpensesByNewest(dayExpenses).map((expense) => ({ ...expense })),
-  };
-}
-
-/**
- * Rebuilds a full history from the live tracker.
- *
- * Used once, when a tracker that predates the history feature is first loaded:
- * today's budget is the only budget on record, so it is the best available basis
- * for those days. From then on days seal themselves as they pass.
- */
-export function backfillHistory(
-  state: TrackerState,
-  now: Date = new Date(),
-): HistoryDay[] {
-  const budget = Number.isFinite(state.budget) ? (state.budget as number) : 0;
-  const groups = groupExpensesByDate(state.expenses);
-  const todayKey = toDateKey(now);
-
-  const keys = [...groups.keys()].filter((key) => key <= todayKey).sort();
-
-  return keys.map((key) => {
-    const upToDate = state.expenses.filter(
-      (expense) => toDateKey(expense.createdAt) <= key,
-    );
-    return buildDayRecord(key, budget, groups.get(key) ?? [], upToDate);
-  });
-}
-
-/**
- * Brings the history up to date with the live tracker.
- *
- * Only today's record is written. Every earlier record is passed through
- * untouched, which is what makes historical reports stable.
- */
-export function syncHistory(
-  history: HistoryDay[],
-  state: TrackerState,
-  now: Date = new Date(),
-): HistoryDay[] {
-  const todayKey = toDateKey(now);
-  if (!todayKey) return history;
-
-  const budget = Number.isFinite(state.budget) ? (state.budget as number) : 0;
-  const groups = groupExpensesByDate(state.expenses);
-
-  // Everything before today is kept exactly as it was recorded.
-  const sealed = new Map<DateKey, HistoryDay>(
-    history.filter((day) => day.date < todayKey).map((day) => [day.date, day]),
-  );
-
-  // Self-healing: a past day that has expenses but was never recorded (storage
-  // cleared, or an expense back-dated) gets a record now. Existing records are
-  // never overwritten, so this can only add, never rewrite.
-  for (const [key, dayExpenses] of groups) {
-    if (key >= todayKey || sealed.has(key)) continue;
-
-    const upToDate = state.expenses.filter(
-      (expense) => toDateKey(expense.createdAt) <= key,
-    );
-    sealed.set(key, buildDayRecord(key, budget, dayExpenses, upToDate));
-  }
-
-  const records = [...sealed.values()];
-  const todayExpenses = groups.get(todayKey) ?? [];
-
-  // A day is only on record once something was spent. Inventing an empty record
-  // would turn "no activity" into a misleading row of zeroes.
-  if (todayExpenses.length === 0) return sortHistory(records);
-
-  const expensesUpToToday = state.expenses.filter(
-    (expense) => toDateKey(expense.createdAt) <= todayKey,
-  );
-
-  records.push(buildDayRecord(todayKey, budget, todayExpenses, expensesUpToToday));
-  return sortHistory(records);
-}
-
-/** Oldest first — the canonical storage order. */
-export function sortHistory(history: HistoryDay[]): HistoryDay[] {
-  return [...history].sort((a, b) => a.date.localeCompare(b.date));
-}
-
-/** Applies a filter, returning matching days newest first for display. */
-export function filterHistory(
-  history: HistoryDay[],
-  filter: HistoryFilter,
-): HistoryDay[] {
-  return history
-    .filter((day) => matchesFilter(day.date, filter))
-    .sort((a, b) => b.date.localeCompare(a.date));
-}
-
-const EMPTY_SUMMARY: HistorySummary = {
-  startingBudget: 0,
-  startingBalance: 0,
-  endingBalance: 0,
-  totalExpenses: 0,
-  expenseCount: 0,
-  activeDays: 0,
-  firstDate: null,
-  lastDate: null,
-};
-
-/**
- * Aggregates a set of days.
- *
- * Only the daily expense totals are summed. Budgets and balances are point-in-
- * time values — adding them across days would be meaningless — so the starting
- * figures come from the earliest day and the ending balance from the latest.
- */
-export function summarizeHistory(days: HistoryDay[]): HistorySummary {
-  if (days.length === 0) return { ...EMPTY_SUMMARY };
-
-  const chronological = sortHistory(days);
-  const first = chronological[0];
-  const last = chronological[chronological.length - 1];
-
-  const totalCentavos = chronological.reduce(
-    (sum, day) => sum + Math.round(day.totalExpenses * 100),
-    0,
-  );
-
-  return {
-    startingBudget: first.budget,
-    startingBalance: first.startingBalance,
-    endingBalance: last.endingBalance,
-    totalExpenses: roundCurrency(totalCentavos / 100),
-    expenseCount: chronological.reduce((sum, day) => sum + day.expenses.length, 0),
-    activeDays: chronological.length,
-    firstDate: first.date,
-    lastDate: last.date,
-  };
 }
 
 /** Turns a named shortcut into a concrete filter. */
@@ -327,4 +107,179 @@ export function presetToFilter(
     default:
       return { mode: "all" };
   }
+}
+
+/* ------------------------------------------------------------------ history */
+
+/** Groups expenses by the calendar day they are recorded for. */
+export function groupExpensesByDate(expenses: Expense[]): Map<DateKey, Expense[]> {
+  const groups = new Map<DateKey, Expense[]>();
+
+  for (const expense of expenses) {
+    const key = expense.expenseDate;
+    if (!isValidDateKey(key)) continue;
+
+    const bucket = groups.get(key);
+    if (bucket) bucket.push(expense);
+    else groups.set(key, [expense]);
+  }
+
+  return groups;
+}
+
+/**
+ * Builds the day-by-day record for every budget.
+ *
+ * Within a budget the balance chains forward through its own days; each budget
+ * starts afresh from its own allotment. A day with no spending is not recorded —
+ * inventing one would turn "no activity" into a misleading row of zeroes.
+ */
+export function buildHistory(budgets: Budget[], expenses: Expense[]): HistoryDay[] {
+  const days: HistoryDay[] = [];
+
+  for (const budget of budgets) {
+    const own = expensesForBudget(expenses, budget.id);
+    if (own.length === 0) continue;
+
+    const groups = groupExpensesByDate(own);
+    const dates = [...groups.keys()].sort();
+
+    let running = roundCurrency(budget.amount);
+
+    for (const date of dates) {
+      const dayExpenses = groups.get(date) ?? [];
+      const totalExpenses = calculateTotalExpenses(dayExpenses);
+      const startingBalance = running;
+      const endingBalance = roundCurrency(startingBalance - totalExpenses);
+      running = endingBalance;
+
+      days.push({
+        date,
+        budgetId: budget.id,
+        budgetName: budget.name,
+        budgetAmount: roundCurrency(budget.amount),
+        startingBalance,
+        endingBalance,
+        totalExpenses,
+        expenses: sortExpensesByNewest(dayExpenses),
+      });
+    }
+  }
+
+  return sortHistoryDays(days);
+}
+
+/** Oldest first, then by budget — the canonical order. */
+export function sortHistoryDays(days: HistoryDay[]): HistoryDay[] {
+  return [...days].sort(
+    (a, b) => a.date.localeCompare(b.date) || a.budgetId.localeCompare(b.budgetId),
+  );
+}
+
+/** Applies a filter, returning matching days newest first for display. */
+export function filterHistory(
+  days: HistoryDay[],
+  filter: HistoryFilter,
+): HistoryDay[] {
+  return days
+    .filter((day) => matchesFilter(day.date, filter))
+    .sort(
+      (a, b) => b.date.localeCompare(a.date) || a.budgetId.localeCompare(b.budgetId),
+    );
+}
+
+/** Convenience: build and filter in one step. */
+export function historyForFilter(
+  budgets: Budget[],
+  expenses: Expense[],
+  filter: HistoryFilter,
+): HistoryDay[] {
+  return filterHistory(buildHistory(budgets, expenses), filter);
+}
+
+const EMPTY_SUMMARY: HistorySummary = {
+  totalAllocated: 0,
+  totalExpenses: 0,
+  totalRemaining: 0,
+  expenseCount: 0,
+  activeDays: 0,
+  budgetCount: 0,
+  firstDate: null,
+  lastDate: null,
+  budgets: [],
+};
+
+/**
+ * Aggregates the selected days.
+ *
+ * Per budget: expenses are summed across the period, while `remaining` is the
+ * balance recorded on that budget's last in-range day — a point in time, not a
+ * sum. Across budgets those independent pots are then added up.
+ */
+export function summarizeHistory(days: HistoryDay[]): HistorySummary {
+  if (days.length === 0) return { ...EMPTY_SUMMARY };
+
+  const chronological = sortHistoryDays(days);
+
+  const byBudget = new Map<string, HistoryDay[]>();
+  for (const day of chronological) {
+    const bucket = byBudget.get(day.budgetId);
+    if (bucket) bucket.push(day);
+    else byBudget.set(day.budgetId, [day]);
+  }
+
+  const budgetSummaries: HistoryBudgetSummary[] = [...byBudget.values()].map(
+    (budgetDays) => {
+      const first = budgetDays[0];
+      const last = budgetDays[budgetDays.length - 1];
+
+      return {
+        budgetId: first.budgetId,
+        budgetName: last.budgetName,
+        budgetAmount: last.budgetAmount,
+        totalExpenses: sumAmounts(budgetDays.map((day) => day.totalExpenses)),
+        // The balance after the last day of this budget inside the range.
+        remaining: last.endingBalance,
+        expenseCount: budgetDays.reduce((sum, day) => sum + day.expenses.length, 0),
+        activeDays: budgetDays.length,
+        firstDate: first.date,
+        lastDate: last.date,
+      };
+    },
+  );
+
+  budgetSummaries.sort(
+    (a, b) => b.firstDate.localeCompare(a.firstDate) || a.budgetName.localeCompare(b.budgetName),
+  );
+
+  const distinctDates = new Set(chronological.map((day) => day.date));
+
+  return {
+    totalAllocated: sumAmounts(budgetSummaries.map((entry) => entry.budgetAmount)),
+    totalExpenses: sumAmounts(budgetSummaries.map((entry) => entry.totalExpenses)),
+    totalRemaining: sumAmounts(budgetSummaries.map((entry) => entry.remaining)),
+    expenseCount: budgetSummaries.reduce((sum, entry) => sum + entry.expenseCount, 0),
+    activeDays: distinctDates.size,
+    budgetCount: budgetSummaries.length,
+    firstDate: chronological[0].date,
+    lastDate: chronological[chronological.length - 1].date,
+    budgets: budgetSummaries,
+  };
+}
+
+/** Budgets whose period intersects the filter, newest period first. */
+export function budgetsInFilter(
+  budgets: Budget[],
+  filter: HistoryFilter,
+): Budget[] {
+  if (filter.mode === "all") return sortBudgetsByPeriod(budgets);
+
+  const start = filter.mode === "single" ? filter.date : filter.start;
+  const end = filter.mode === "single" ? filter.date : filter.end;
+
+  return sortBudgetsByPeriod(
+    budgets.filter(
+      (budget) => budget.startDate <= end && start <= budget.endDate,
+    ),
+  );
 }

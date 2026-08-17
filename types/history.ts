@@ -1,28 +1,30 @@
 /**
- * Historical tracker types.
+ * Historical reporting types.
  *
- * A `HistoryDay` is an immutable snapshot of one calendar day. Once that day has
- * passed the record is sealed and is never recomputed — editing today's budget
- * or deleting an old expense must not rewrite what a past day reported.
+ * History is *derived* from budgets and expenses rather than stored. That is
+ * safe because a budget whose period has ended is immutable: its amount, dates
+ * and name can no longer change, so any report over past dates is reproducible
+ * from source data. Deriving also means an expense back-dated into a past day
+ * shows up where it belongs, which a frozen daily snapshot would hide.
  */
 
+import type { DateKey } from "@/lib/dates";
 import type { Expense } from "@/types/expense";
 
-/** A local calendar date as `YYYY-MM-DD`. */
-export type DateKey = string;
-
+/** One calendar day's activity within one budget. */
 export interface HistoryDay {
-  /** Local calendar date this record covers. */
   date: DateKey;
-  /** Budget allotment in effect on that day. */
-  budget: number;
-  /** Balance carried into the day, before its own expenses. */
+  /** The budget these expenses were charged to. */
+  budgetId: string;
+  budgetName: string;
+  budgetAmount: number;
+  /** That budget's balance entering the day. */
   startingBalance: number;
-  /** Balance at the end of the day: `startingBalance - totalExpenses`. */
+  /** That budget's balance after the day: `startingBalance - totalExpenses`. */
   endingBalance: number;
-  /** Sum of that day's expenses only. */
+  /** Sum of this day's expenses within this budget. */
   totalExpenses: number;
-  /** Frozen copies of the expenses recorded that day, newest first. */
+  /** Expenses recorded that day for that budget, newest first. */
   expenses: Expense[];
 }
 
@@ -32,7 +34,6 @@ export type HistoryFilter =
   | { mode: "single"; date: DateKey }
   | { mode: "range"; start: DateKey; end: DateKey };
 
-/** Named shortcuts offered alongside the date inputs. */
 export type HistoryPreset =
   | "today"
   | "yesterday"
@@ -41,28 +42,42 @@ export type HistoryPreset =
   | "lastMonth"
   | "all";
 
+/** One budget's figures within the selected period. */
+export interface HistoryBudgetSummary {
+  budgetId: string;
+  budgetName: string;
+  /** The budget's full allotment. */
+  budgetAmount: number;
+  /** Spend inside the selected period only. */
+  totalExpenses: number;
+  /** The budget's balance after the last in-range day. */
+  remaining: number;
+  expenseCount: number;
+  activeDays: number;
+  firstDate: DateKey;
+  lastDate: DateKey;
+}
+
 /**
  * Aggregate figures for the selected period.
  *
- * `startingBudget` and `endingBalance` are read from the recorded snapshots
- * rather than recomputed from today's budget, so a report stays accurate after
- * the budget changes.
+ * Budgets are independent pots, so allotments and remaining balances are summed
+ * across budgets — but never across days within a budget, where they are
+ * point-in-time values.
  */
 export interface HistorySummary {
-  /** Budget recorded on the earliest day in range. */
-  startingBudget: number;
-  /** Balance carried into the earliest day in range. */
-  startingBalance: number;
-  /** Balance recorded at the end of the latest day in range. */
-  endingBalance: number;
-  /** Sum of the daily totals inside the range only. */
+  /** Sum of the allotments of every budget appearing in range. */
+  totalAllocated: number;
+  /** Sum of the expenses inside the range. */
   totalExpenses: number;
-  /** Number of individual expenses inside the range. */
+  /** Sum of each budget's remaining balance as of its last in-range day. */
+  totalRemaining: number;
   expenseCount: number;
-  /** Days in range that actually have a record. */
+  /** Distinct calendar days with activity. */
   activeDays: number;
-  /** Earliest date in range, or `null` when the range is empty. */
+  budgetCount: number;
   firstDate: DateKey | null;
-  /** Latest date in range, or `null` when the range is empty. */
   lastDate: DateKey | null;
+  /** Per-budget breakdown, newest period first. */
+  budgets: HistoryBudgetSummary[];
 }
