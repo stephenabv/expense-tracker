@@ -5,7 +5,8 @@ import { useEffect, useState } from "react";
 import type { HistoryFilter, HistoryPreset } from "@/types/history";
 import { Button } from "@/components/ui/Button";
 import { DateField } from "@/components/ui/DateField";
-import { presetToFilter, toDateKey, validateFilter } from "@/lib/history";
+import { presetToFilter, validateFilter } from "@/lib/history";
+import { todayKey } from "@/lib/dates";
 import { cn } from "@/lib/utils";
 
 const PRESETS: Array<{ id: HistoryPreset; label: string }> = [
@@ -31,7 +32,7 @@ export interface HistoryFilterBarProps {
  * hand-picked dates wait for Apply so a half-typed range never runs.
  */
 export function HistoryFilterBar({ filter, onApply }: HistoryFilterBarProps) {
-  const today = toDateKey(new Date());
+  const today = todayKey();
 
   const [mode, setMode] = useState<Mode>(
     filter.mode === "range" ? "range" : "single",

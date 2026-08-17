@@ -4,8 +4,7 @@ import { useState } from "react";
 
 import type { HistoryDay } from "@/types/history";
 import { formatCurrency } from "@/lib/currency";
-import { formatDateKey } from "@/lib/history";
-import { formatFullDate } from "@/lib/utils";
+import { formatDateKey } from "@/lib/dates";
 import { cn } from "@/lib/utils";
 
 function ChevronIcon({ open }: { open: boolean }) {
@@ -34,10 +33,10 @@ export interface HistoryDayCardProps {
   defaultOpen?: boolean;
 }
 
-/** One collapsible day in the breakdown. */
+/** One day within one budget, collapsible. */
 export function HistoryDayCard({ day, defaultOpen = false }: HistoryDayCardProps) {
   const [open, setOpen] = useState(defaultOpen);
-  const panelId = `day-${day.date}`;
+  const panelId = `day-${day.date}-${day.budgetId}`;
 
   const countLabel =
     day.expenses.length === 1 ? "1 expense" : `${day.expenses.length} expenses`;
@@ -56,7 +55,10 @@ export function HistoryDayCard({ day, defaultOpen = false }: HistoryDayCardProps
             <p className="text-[0.9375rem] font-semibold tracking-tight text-foreground">
               {formatDateKey(day.date)}
             </p>
-            <p className="mt-0.5 text-[0.8125rem] text-muted">
+            {/* The budget is named on every row: with several allotments in
+                range, the date alone does not say which pot was spent. */}
+            <p className="mt-0.5 truncate text-[0.8125rem] text-muted">
+              <span className="text-muted-strong">{day.budgetName}</span> ·{" "}
               {countLabel} ·{" "}
               <span className="tabular">{formatCurrency(day.totalExpenses)}</span>
             </p>
@@ -69,26 +71,10 @@ export function HistoryDayCard({ day, defaultOpen = false }: HistoryDayCardProps
         <div id={panelId} className="border-t border-border-subtle">
           <ul className="divide-y divide-border-subtle">
             {day.expenses.map((expense) => (
-              <li
-                key={expense.id}
-                className="flex items-center gap-3 px-4 py-3 sm:px-5"
-              >
-                <div className="min-w-0 flex-1">
-                  <p className="truncate text-[0.9375rem] text-foreground">
-                    {expense.name}
-                  </p>
-                  <time
-                    dateTime={expense.createdAt}
-                    title={formatFullDate(expense.createdAt)}
-                    className="text-[0.8125rem] text-muted"
-                  >
-                    {new Date(expense.createdAt).toLocaleTimeString("en-PH", {
-                      hour: "numeric",
-                      minute: "2-digit",
-                      hour12: true,
-                    })}
-                  </time>
-                </div>
+              <li key={expense.id} className="flex items-center gap-3 px-4 py-3 sm:px-5">
+                <p className="min-w-0 flex-1 truncate text-[0.9375rem] text-foreground">
+                  {expense.name}
+                </p>
                 <p className="shrink-0 text-[0.9375rem] font-medium tabular text-foreground">
                   {formatCurrency(expense.amount)}
                 </p>
@@ -96,13 +82,11 @@ export function HistoryDayCard({ day, defaultOpen = false }: HistoryDayCardProps
             ))}
           </ul>
 
-          {/* Point-in-time figures for the day, kept visually apart from the
-              daily total so they are not mistaken for something summable. */}
           <dl className="grid grid-cols-2 gap-x-4 gap-y-2 border-t border-border-subtle bg-surface-muted px-4 py-3.5 text-[0.8125rem] sm:grid-cols-4 sm:px-5">
             <div>
               <dt className="text-muted">Budget</dt>
               <dd className="mt-0.5 font-medium tabular text-foreground">
-                {formatCurrency(day.budget)}
+                {formatCurrency(day.budgetAmount)}
               </dd>
             </div>
             <div>

@@ -11,7 +11,7 @@ import autoTable from "jspdf-autotable";
 
 import type { HistoryDay, HistorySummary } from "@/types/history";
 import { formatCurrency } from "@/lib/currency";
-import { formatDateKey } from "@/lib/history";
+import { formatDateKey, formatDateRange } from "@/lib/dates";
 import {
   PDF_FONT_BOLD_BASE64,
   PDF_FONT_NAME,
@@ -38,17 +38,6 @@ const timestampFormatter = new Intl.DateTimeFormat("en-PH", {
   dateStyle: "long",
   timeStyle: "short",
 });
-
-const timeFormatter = new Intl.DateTimeFormat("en-PH", {
-  hour: "numeric",
-  minute: "2-digit",
-  hour12: true,
-});
-
-function formatTime(iso: string): string {
-  const date = new Date(iso);
-  return Number.isNaN(date.getTime()) ? "—" : timeFormatter.format(date);
-}
 
 /**
  * Registers the embedded font.
@@ -188,10 +177,10 @@ export function buildHistoryReport(input: HistoryReportInput): jsPDF {
 
   y += 20;
   const summaryRows: Array<[string, string]> = [
-    ["Starting Budget", formatCurrency(summary.startingBudget)],
-    ["Starting Balance", formatCurrency(summary.startingBalance)],
+    ["Total Allocated", formatCurrency(summary.totalAllocated)],
     ["Total Expenses", formatCurrency(summary.totalExpenses)],
-    ["Ending Balance", formatCurrency(summary.endingBalance)],
+    ["Total Remaining", formatCurrency(summary.totalRemaining)],
+    ["Budgets", String(summary.budgetCount)],
     ["Expense Count", String(summary.expenseCount)],
     ["Active Days", String(summary.activeDays)],
   ];
@@ -201,15 +190,78 @@ export function buildHistoryReport(input: HistoryReportInput): jsPDF {
     y += 17;
   }
 
+  // ---- Budget summary -----------------------------------------------------
+  // Each allotment is its own pot, so the report accounts for them separately
+  // before it lists any expense.
+  if (summary.budgets.length > 0) {
+    y += 6;
+    horizontalRule(doc, y, contentWidth);
+
+    y += 22;
+    doc.setFont(PDF_FONT_NAME, "bold");
+    doc.setFontSize(9);
+    doc.setTextColor(MUTED);
+    doc.text("BUDGET SUMMARY", PAGE_MARGIN, y);
+    y += 8;
+
+    autoTable(doc, {
+      startY: y,
+      margin: {
+        top: PAGE_MARGIN,
+        left: PAGE_MARGIN,
+        right: PAGE_MARGIN,
+        bottom: PAGE_MARGIN + FOOTER_HEIGHT,
+      },
+      head: [["Budget", "Period", "Budget", "Spent", "Remaining"]],
+      body: summary.budgets.map((entry) => [
+        entry.budgetName,
+        formatDateRange(entry.firstDate, entry.lastDate),
+        formatCurrency(entry.budgetAmount),
+        formatCurrency(entry.totalExpenses),
+        formatCurrency(entry.remaining),
+      ]),
+      showHead: "everyPage",
+      rowPageBreak: "avoid",
+      theme: "plain",
+      styles: {
+        font: PDF_FONT_NAME,
+        fontSize: 9,
+        cellPadding: { top: 5, right: 6, bottom: 5, left: 0 },
+        textColor: INK,
+        overflow: "linebreak",
+        valign: "top",
+      },
+      headStyles: {
+        font: PDF_FONT_NAME,
+        fontStyle: "normal",
+        fontSize: 8,
+        textColor: MUTED,
+        lineWidth: { bottom: 0.75 },
+        lineColor: RULE,
+      },
+      columnStyles: {
+        0: { cellWidth: contentWidth - 340, fontStyle: "bold" },
+        1: { cellWidth: 120, textColor: MUTED, fontSize: 8.5 },
+        2: { cellWidth: 72, halign: "right" },
+        3: { cellWidth: 72, halign: "right" },
+        4: { cellWidth: 76, halign: "right", fontStyle: "bold" },
+      },
+    });
+
+    const summaryY = (doc as unknown as { lastAutoTable?: { finalY: number } })
+      .lastAutoTable?.finalY;
+    y = typeof summaryY === "number" ? summaryY + 6 : y + 40;
+  }
+
   y += 6;
   horizontalRule(doc, y, contentWidth);
 
-  // ---- Daily breakdown ----------------------------------------------------
+  // ---- Expense details ----------------------------------------------------
   y += 22;
   doc.setFont(PDF_FONT_NAME, "bold");
   doc.setFontSize(9);
   doc.setTextColor(MUTED);
-  doc.text("DAILY BREAKDOWN", PAGE_MARGIN, y);
+  doc.text("EXPENSE DETAILS", PAGE_MARGIN, y);
   y += 8;
 
   if (days.length === 0) {
@@ -225,7 +277,7 @@ export function buildHistoryReport(input: HistoryReportInput): jsPDF {
   for (const day of days) {
     // Keep a day heading with at least the first rows of its table; starting a
     // day at the very bottom of a page reads as an orphan.
-    const headingBlock = 58;
+    const headingBlock = 74;
     if (y + headingBlock > maxY) {
       doc.addPage();
       y = PAGE_MARGIN + 6;
@@ -249,7 +301,15 @@ export function buildHistoryReport(input: HistoryReportInput): jsPDF {
       { align: "right" },
     );
 
-    y += 10;
+    // Name the allotment under every date: with several budgets in range the
+    // date alone does not say which pot the day drew from.
+    y += 13;
+    doc.setFont(PDF_FONT_NAME, "bold");
+    doc.setFontSize(9);
+    doc.setTextColor(MUTED);
+    doc.text(day.budgetName, PAGE_MARGIN, y);
+
+    y += 6;
 
     autoTable(doc, {
       startY: y,
@@ -259,13 +319,12 @@ export function buildHistoryReport(input: HistoryReportInput): jsPDF {
         right: PAGE_MARGIN,
         bottom: PAGE_MARGIN + FOOTER_HEIGHT,
       },
-      head: [["Expense", "Time", "Amount"]],
+      head: [["Expense", "Amount"]],
       body: day.expenses.map((expense) => [
         expense.name,
-        formatTime(expense.createdAt),
         formatCurrency(expense.amount),
       ]),
-      foot: [["Daily Total", "", formatCurrency(day.totalExpenses)]],
+      foot: [["Daily Total", formatCurrency(day.totalExpenses)]],
       // Repeat the column headers when a day's table spills onto a new page.
       showHead: "everyPage",
       showFoot: "lastPage",
@@ -297,9 +356,8 @@ export function buildHistoryReport(input: HistoryReportInput): jsPDF {
         lineColor: RULE,
       },
       columnStyles: {
-        0: { cellWidth: contentWidth - 190 },
-        1: { cellWidth: 80, textColor: MUTED },
-        2: { cellWidth: 110, halign: "right" },
+        0: { cellWidth: contentWidth - 120 },
+        1: { cellWidth: 120, halign: "right" },
       },
     });
 
