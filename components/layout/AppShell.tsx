@@ -7,9 +7,10 @@ import type { ReactNode } from "react";
 import { cn } from "@/lib/utils";
 
 const NAV = [
-  { href: "/", label: "Tracker" },
+  { href: "/tracker", label: "Tracker" },
   { href: "/budgets", label: "Budgets" },
   { href: "/history", label: "History" },
+  { href: "/profile", label: "Account" },
 ] as const;
 
 /**
@@ -28,9 +29,11 @@ export function AppShell({ children }: { children: ReactNode }) {
           Expense Tracker
         </h1>
 
+        {/* Scrolls sideways in its own strip on a narrow phone rather than
+            widening the page. */}
         <nav
           aria-label="Sections"
-          className="flex items-center gap-1 rounded-xl border border-border-subtle bg-surface p-1 shadow-card"
+          className="-mx-1 flex max-w-full items-center gap-1 overflow-x-auto rounded-xl border border-border-subtle bg-surface p-1 shadow-card"
         >
           {NAV.map((item) => {
             const active = pathname === item.href;
@@ -40,7 +43,7 @@ export function AppShell({ children }: { children: ReactNode }) {
                 href={item.href}
                 aria-current={active ? "page" : undefined}
                 className={cn(
-                  "rounded-lg px-3 py-1.5 text-sm font-medium transition-colors duration-150",
+                  "shrink-0 rounded-lg px-3 py-1.5 text-sm font-medium transition-colors duration-150",
                   "focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-ring",
                   active
                     ? "bg-foreground text-background"

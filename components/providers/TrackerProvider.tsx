@@ -1,39 +1,31 @@
 "use client";
 
 /**
- * Owns the single source of truth: budget allotments and expenses.
+ * Client-side view of one user's tracker.
  *
- * Components read derived figures from `useTracker()` and never compute money
- * themselves. Persistence goes through the injected `TrackerRepository`, so
- * moving to a database means passing a different repository here.
+ * The server is authoritative. Every mutation calls a server action, which
+ * re-validates the request and resolves the owner from the session cookie, then
+ * this provider applies the row the server returned. Nothing is written locally
+ * and hoped for: if the server refuses, local state never changes and the
+ * reason is surfaced.
  *
- * Nothing derived is stored. Balances, statuses and History are all computed
- * from budgets + expenses, which is why they can never drift apart.
+ * Derived figures (balances, statuses, history) are still computed here from
+ * the same pure functions the server uses, so the two cannot disagree.
  */
 
 import {
   createContext,
   useCallback,
   useContext,
-  useEffect,
   useMemo,
-  useReducer,
   useRef,
+  useState,
   type ReactNode,
 } from "react";
 
 import type { Budget, BudgetInput, BudgetSummary } from "@/types/budget";
 import type { Expense, ExpenseInput } from "@/types/expense";
-import {
-  calculateAvailableBalance,
-  sortExpensesByNewest,
-} from "@/lib/calculations";
-import {
-  EMPTY_DATA,
-  createLocalStorageRepository,
-  type PersistedData,
-  type TrackerRepository,
-} from "@/lib/storage";
+import { calculateAvailableBalance, sortExpensesByNewest } from "@/lib/calculations";
 import {
   activeBudget,
   budgetsForDate,
@@ -43,140 +35,41 @@ import {
   summarizeBudgets,
 } from "@/lib/budgets";
 import { todayKey, type DateKey } from "@/lib/dates";
-import { roundCurrency } from "@/lib/currency";
-import { createId } from "@/lib/utils";
-
-interface InternalState extends PersistedData {
-  /** False until persisted data has been read, so the UI can avoid a flash. */
-  hydrated: boolean;
-}
-
-type Action =
-  | { type: "hydrate"; payload: PersistedData }
-  | { type: "addBudget"; payload: Budget }
-  | { type: "updateBudget"; payload: { id: string; input: BudgetInput; now: string } }
-  | { type: "setBudgetLocked"; payload: { id: string; locked: boolean; now: string } }
-  | { type: "deleteBudget"; payload: { id: string } }
-  | { type: "addExpense"; payload: Expense }
-  | { type: "updateExpense"; payload: { id: string; input: ExpenseInput; now: string } }
-  | { type: "deleteExpense"; payload: { id: string } }
-  | { type: "reset" };
-
-function reducer(state: InternalState, action: Action): InternalState {
-  switch (action.type) {
-    case "hydrate":
-      return { ...action.payload, hydrated: true };
-
-    case "addBudget":
-      return { ...state, budgets: [action.payload, ...state.budgets] };
-
-    case "updateBudget":
-      return {
-        ...state,
-        budgets: state.budgets.map((budget) =>
-          budget.id === action.payload.id
-            ? {
-                ...budget,
-                name: action.payload.input.name,
-                amount: roundCurrency(action.payload.input.amount),
-                startDate: action.payload.input.startDate,
-                endDate: action.payload.input.endDate,
-                updatedAt: action.payload.now,
-                // Saving re-locks: editing is always a deliberate, bounded act.
-                locked: true,
-              }
-            : budget,
-        ),
-      };
-
-    case "setBudgetLocked":
-      return {
-        ...state,
-        budgets: state.budgets.map((budget) =>
-          budget.id === action.payload.id
-            ? { ...budget, locked: action.payload.locked, updatedAt: action.payload.now }
-            : budget,
-        ),
-      };
-
-    case "deleteBudget":
-      return {
-        ...state,
-        budgets: state.budgets.filter((budget) => budget.id !== action.payload.id),
-        // An expense cannot outlive the allotment it was charged to.
-        expenses: state.expenses.filter(
-          (expense) => expense.budgetId !== action.payload.id,
-        ),
-      };
-
-    case "addExpense":
-      return { ...state, expenses: [action.payload, ...state.expenses] };
-
-    case "updateExpense":
-      return {
-        ...state,
-        expenses: state.expenses.map((expense) =>
-          expense.id === action.payload.id
-            ? {
-                ...expense,
-                name: action.payload.input.name,
-                amount: roundCurrency(action.payload.input.amount),
-                expenseDate: action.payload.input.expenseDate,
-                budgetId: action.payload.input.budgetId,
-                updatedAt: action.payload.now,
-              }
-            : expense,
-        ),
-      };
-
-    case "deleteExpense":
-      return {
-        ...state,
-        expenses: state.expenses.filter(
-          (expense) => expense.id !== action.payload.id,
-        ),
-      };
-
-    case "reset":
-      return { ...EMPTY_DATA, hydrated: true };
-
-    default:
-      return state;
-  }
-}
+import { useToast } from "@/components/ui/Toast";
+import {
+  createBudgetAction,
+  createExpenseAction,
+  deleteBudgetAction,
+  deleteExpenseAction,
+  setBudgetLockedAction,
+  updateBudgetAction,
+  updateExpenseAction,
+} from "@/lib/server/tracker-actions";
 
 interface TrackerContextValue {
+  /** Server-rendered data arrives with the page, so this is always true. */
   hydrated: boolean;
-  /** All allotments, newest period first. */
+  /** True while a mutation is in flight. */
+  pending: boolean;
   budgets: Budget[];
-  /** Derived figures for each budget, in the same order. */
   budgetSummaries: BudgetSummary[];
-  /** Every expense, newest first. */
   expenses: Expense[];
-  /** The allotment covering today, when exactly one does. */
   currentBudget: Budget | null;
 
-  createBudget: (input: BudgetInput) => Budget;
-  updateBudget: (id: string, input: BudgetInput) => void;
-  setBudgetLocked: (id: string, locked: boolean) => void;
-  deleteBudget: (id: string) => void;
+  createBudget: (input: BudgetInput) => Promise<void>;
+  updateBudget: (id: string, input: BudgetInput) => Promise<void>;
+  setBudgetLocked: (id: string, locked: boolean) => Promise<void>;
+  deleteBudget: (id: string) => Promise<void>;
 
-  addExpense: (input: ExpenseInput) => Expense;
-  updateExpense: (id: string, input: ExpenseInput) => void;
-  deleteExpense: (id: string) => void;
-  resetAll: () => void;
+  addExpense: (input: ExpenseInput) => Promise<void>;
+  updateExpense: (id: string, input: ExpenseInput) => Promise<void>;
+  deleteExpense: (id: string) => Promise<void>;
 
-  /** Lookups that read the latest state without re-rendering their callers. */
   getBudget: (id: string) => Budget | null;
   getBudgetSummary: (id: string) => BudgetSummary | null;
   expensesFor: (budgetId: string) => Expense[];
   budgetsCovering: (date: DateKey) => Budget[];
-  /**
-   * Balance a budget can still spend. Pass the id of the expense being edited so
-   * its current amount is not counted against the user twice.
-   */
   availableBalanceFor: (budgetId: string, excludeExpenseId?: string) => number;
-  /** True once the period has ended, which makes the budget immutable. */
   isBudgetCompleted: (budget: Budget) => boolean;
 }
 
@@ -184,138 +77,132 @@ const TrackerContext = createContext<TrackerContextValue | null>(null);
 
 export function TrackerProvider({
   children,
-  repository,
+  initialBudgets,
+  initialExpenses,
 }: {
   children: ReactNode;
-  repository?: TrackerRepository;
+  initialBudgets: Budget[];
+  initialExpenses: Expense[];
 }) {
-  const repo = useMemo(
-    () => repository ?? createLocalStorageRepository(),
-    [repository],
+  const { showToast } = useToast();
+  const [budgets, setBudgets] = useState<Budget[]>(initialBudgets);
+  const [expenses, setExpenses] = useState<Expense[]>(initialExpenses);
+  const [inFlight, setInFlight] = useState(0);
+  const inFlightRef = useRef(0);
+
+  /** Wraps a mutation so the UI can show that something is being saved. */
+  const track = useCallback(async (run: () => Promise<void>) => {
+    inFlightRef.current += 1;
+    setInFlight(inFlightRef.current);
+    try {
+      await run();
+    } finally {
+      inFlightRef.current -= 1;
+      setInFlight(inFlightRef.current);
+    }
+  }, []);
+
+  /** Reports a refusal without changing local state. */
+  const fail = useCallback(
+    (message: string) => {
+      showToast(message);
+    },
+    [showToast],
   );
 
-  const [state, dispatch] = useReducer(reducer, {
-    ...EMPTY_DATA,
-    hydrated: false,
-  });
-
-  // Load persisted state once on mount. Reading in an effect (rather than
-  // during render) keeps the server and first client render identical.
-  useEffect(() => {
-    let cancelled = false;
-
-    repo
-      .load()
-      .then((loaded) => {
-        if (!cancelled) dispatch({ type: "hydrate", payload: loaded });
-      })
-      .catch(() => {
-        if (!cancelled) dispatch({ type: "hydrate", payload: EMPTY_DATA });
-      });
-
-    return () => {
-      cancelled = true;
-    };
-  }, [repo]);
-
-  // Persist after every change, but never write the pre-hydration placeholder
-  // over real saved data.
-  const stateRef = useRef(state);
-  stateRef.current = state;
-
-  useEffect(() => {
-    if (!state.hydrated) return;
-    void repo.save({ budgets: state.budgets, expenses: state.expenses });
-  }, [repo, state.hydrated, state.budgets, state.expenses]);
-
-  const createBudget = useCallback((input: BudgetInput) => {
-    const timestamp = new Date().toISOString();
-    const budget: Budget = {
-      id: createId(),
-      name: input.name,
-      amount: roundCurrency(input.amount),
-      startDate: input.startDate,
-      endDate: input.endDate,
-      createdAt: timestamp,
-      updatedAt: timestamp,
-      // New budgets arrive locked, so the amount cannot be nudged by accident.
-      locked: true,
-    };
-    dispatch({ type: "addBudget", payload: budget });
-    return budget;
-  }, []);
-
-  const updateBudget = useCallback((id: string, input: BudgetInput) => {
-    dispatch({
-      type: "updateBudget",
-      payload: { id, input, now: new Date().toISOString() },
-    });
-  }, []);
-
-  const setBudgetLocked = useCallback((id: string, locked: boolean) => {
-    dispatch({
-      type: "setBudgetLocked",
-      payload: { id, locked, now: new Date().toISOString() },
-    });
-  }, []);
-
-  const deleteBudget = useCallback((id: string) => {
-    dispatch({ type: "deleteBudget", payload: { id } });
-  }, []);
-
-  const addExpense = useCallback((input: ExpenseInput) => {
-    const timestamp = new Date().toISOString();
-    const expense: Expense = {
-      id: createId(),
-      budgetId: input.budgetId,
-      name: input.name,
-      amount: roundCurrency(input.amount),
-      expenseDate: input.expenseDate,
-      createdAt: timestamp,
-      updatedAt: timestamp,
-    };
-    dispatch({ type: "addExpense", payload: expense });
-    return expense;
-  }, []);
-
-  const updateExpense = useCallback((id: string, input: ExpenseInput) => {
-    dispatch({
-      type: "updateExpense",
-      payload: { id, input, now: new Date().toISOString() },
-    });
-  }, []);
-
-  const deleteExpense = useCallback((id: string) => {
-    dispatch({ type: "deleteExpense", payload: { id } });
-  }, []);
-
-  const resetAll = useCallback(() => {
-    dispatch({ type: "reset" });
-  }, []);
-
-  const sortedBudgets = useMemo(
-    () => sortBudgetsByPeriod(state.budgets),
-    [state.budgets],
+  const createBudget = useCallback(
+    (input: BudgetInput) =>
+      track(async () => {
+        const result = await createBudgetAction(input);
+        if (!result.ok) return fail(result.error);
+        setBudgets((current) => [result.data, ...current]);
+      }),
+    [fail, track],
   );
 
-  const sortedExpenses = useMemo(
-    () => sortExpensesByNewest(state.expenses),
-    [state.expenses],
+  const updateBudget = useCallback(
+    (id: string, input: BudgetInput) =>
+      track(async () => {
+        const result = await updateBudgetAction(id, input);
+        if (!result.ok) return fail(result.error);
+        setBudgets((current) =>
+          current.map((budget) => (budget.id === id ? result.data : budget)),
+        );
+      }),
+    [fail, track],
   );
+
+  const setBudgetLocked = useCallback(
+    (id: string, locked: boolean) =>
+      track(async () => {
+        const result = await setBudgetLockedAction(id, locked);
+        if (!result.ok) return fail(result.error);
+        setBudgets((current) =>
+          current.map((budget) => (budget.id === id ? result.data : budget)),
+        );
+      }),
+    [fail, track],
+  );
+
+  const deleteBudget = useCallback(
+    (id: string) =>
+      track(async () => {
+        const result = await deleteBudgetAction(id);
+        if (!result.ok) return fail(result.error);
+        setBudgets((current) => current.filter((budget) => budget.id !== id));
+        // The database removes the budget's expenses with it; mirror that here.
+        setExpenses((current) =>
+          current.filter((expense) => expense.budgetId !== id),
+        );
+      }),
+    [fail, track],
+  );
+
+  const addExpense = useCallback(
+    (input: ExpenseInput) =>
+      track(async () => {
+        const result = await createExpenseAction(input);
+        if (!result.ok) return fail(result.error);
+        setExpenses((current) => [result.data, ...current]);
+      }),
+    [fail, track],
+  );
+
+  const updateExpense = useCallback(
+    (id: string, input: ExpenseInput) =>
+      track(async () => {
+        const result = await updateExpenseAction(id, input);
+        if (!result.ok) return fail(result.error);
+        setExpenses((current) =>
+          current.map((expense) => (expense.id === id ? result.data : expense)),
+        );
+      }),
+    [fail, track],
+  );
+
+  const deleteExpense = useCallback(
+    (id: string) =>
+      track(async () => {
+        const result = await deleteExpenseAction(id);
+        if (!result.ok) return fail(result.error);
+        setExpenses((current) => current.filter((expense) => expense.id !== id));
+      }),
+    [fail, track],
+  );
+
+  const sortedBudgets = useMemo(() => sortBudgetsByPeriod(budgets), [budgets]);
+  const sortedExpenses = useMemo(() => sortExpensesByNewest(expenses), [expenses]);
 
   const budgetSummaries = useMemo(
-    () => summarizeBudgets(sortedBudgets, state.expenses),
-    [sortedBudgets, state.expenses],
+    () => summarizeBudgets(sortedBudgets, expenses),
+    [sortedBudgets, expenses],
   );
 
-  const currentBudget = useMemo(
-    () => activeBudget(sortedBudgets),
-    [sortedBudgets],
-  );
+  const currentBudget = useMemo(() => activeBudget(sortedBudgets), [sortedBudgets]);
 
   const getBudget = useCallback(
-    (id: string) => stateRef.current.budgets.find((b) => b.id === id) ?? null,
-    [],
+    (id: string) => budgets.find((budget) => budget.id === id) ?? null,
+    [budgets],
   );
 
   const getBudgetSummary = useCallback(
@@ -324,35 +211,34 @@ export function TrackerProvider({
   );
 
   const expensesFor = useCallback(
-    (budgetId: string) =>
-      sortExpensesByNewest(expensesForBudget(stateRef.current.expenses, budgetId)),
-    [],
+    (budgetId: string) => sortExpensesByNewest(expensesForBudget(expenses, budgetId)),
+    [expenses],
   );
 
   const budgetsCovering = useCallback(
-    (date: DateKey) => budgetsForDate(stateRef.current.budgets, date),
-    [],
+    (date: DateKey) => budgetsForDate(budgets, date),
+    [budgets],
   );
 
   const availableBalanceFor = useCallback(
     (budgetId: string, excludeExpenseId?: string) => {
-      const budget = stateRef.current.budgets.find((b) => b.id === budgetId);
+      const budget = budgets.find((entry) => entry.id === budgetId);
       if (!budget) return 0;
-
       return calculateAvailableBalance(
         budget.amount,
-        expensesForBudget(stateRef.current.expenses, budgetId),
+        expensesForBudget(expenses, budgetId),
         excludeExpenseId,
       );
     },
-    [],
+    [budgets, expenses],
   );
 
   const isBudgetCompleted = useCallback((budget: Budget) => isCompleted(budget), []);
 
   const value = useMemo<TrackerContextValue>(
     () => ({
-      hydrated: state.hydrated,
+      hydrated: true,
+      pending: inFlight > 0,
       budgets: sortedBudgets,
       budgetSummaries,
       expenses: sortedExpenses,
@@ -364,7 +250,6 @@ export function TrackerProvider({
       addExpense,
       updateExpense,
       deleteExpense,
-      resetAll,
       getBudget,
       getBudgetSummary,
       expensesFor,
@@ -373,7 +258,7 @@ export function TrackerProvider({
       isBudgetCompleted,
     }),
     [
-      state.hydrated,
+      inFlight,
       sortedBudgets,
       budgetSummaries,
       sortedExpenses,
@@ -385,7 +270,6 @@ export function TrackerProvider({
       addExpense,
       updateExpense,
       deleteExpense,
-      resetAll,
       getBudget,
       getBudgetSummary,
       expensesFor,

@@ -1,6 +1,5 @@
 import type { Metadata, Viewport } from "next";
 
-import { TrackerProvider } from "@/components/providers/TrackerProvider";
 import { ToastProvider } from "@/components/ui/Toast";
 import "./globals.css";
 
@@ -32,9 +31,9 @@ export default function RootLayout({
   return (
     <html lang="en">
       <body className="min-h-dvh antialiased">
-        <ToastProvider>
-          <TrackerProvider>{children}</TrackerProvider>
-        </ToastProvider>
+        {/* Tracker data is loaded per page, scoped to the signed-in user, so
+            the provider lives with those routes rather than here. */}
+        <ToastProvider>{children}</ToastProvider>
       </body>
     </html>
   );

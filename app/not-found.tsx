@@ -11,7 +11,7 @@ export default function NotFound() {
         The page you were looking for does not exist.
       </p>
       <Link
-        href="/"
+        href="/tracker"
         className="mt-6 inline-flex h-11 items-center rounded-xl bg-foreground px-4 text-sm font-medium text-background transition-opacity hover:opacity-90 focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-ring"
       >
         Back to dashboard

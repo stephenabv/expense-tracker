@@ -1,9 +1,10 @@
-import { Dashboard } from "@/components/dashboard/Dashboard";
+import { redirect } from "next/navigation";
 
-export default function Home() {
-  return (
-    <main className="min-h-dvh">
-      <Dashboard />
-    </main>
-  );
+import { currentUser } from "@/lib/server/session";
+import { DEFAULT_AUTHENTICATED_ROUTE, LOGIN_ROUTE } from "@/lib/auth/routes";
+
+/** The entry point simply routes to the right place for the visitor. */
+export default async function Home() {
+  const user = await currentUser();
+  redirect(user ? DEFAULT_AUTHENTICATED_ROUTE : LOGIN_ROUTE);
 }
