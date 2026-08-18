@@ -1,9 +1,13 @@
 # Expense Tracker
 
 A minimalist personal budget and expense tracker built with Next.js, TypeScript
-and Tailwind CSS. Create budget allotments for different periods, record
-expenses against them, review your history by date, and export it as a PDF —
-in Philippine Peso.
+and Tailwind CSS. Sign up, verify your email, then create budget allotments for
+different periods, record expenses against them, review your history by date,
+and export it as a PDF — in Philippine Peso.
+
+Every account's data is its own: budgets and expenses are stored in PostgreSQL
+against the owner's id, and every query filters on the id resolved from the
+session cookie.
 
 A **budget allotment** is one independent financial period: its own name, its
 own amount, its own inclusive date range, and its own expenses. It is not a
@@ -18,6 +22,15 @@ expense records on each render, so the screen cannot drift from the data.
 
 ## Features
 
+- **Accounts** — sign up, log in, log out, verify your email, and reset a
+  forgotten password. Passwords are hashed with Argon2id; sessions live in an
+  encrypted HTTP-only cookie.
+- **Email verification is a prerequisite** — an unverified account cannot log
+  in *and* cannot reset its password. Both paths lead back to verification, so
+  registering someone else's address never becomes a way into their account.
+- **Per-user data** — the tracker, budgets and history are scoped to the signed
+  in account. Ownership is enforced in SQL, not by a check that could be
+  skipped.
 - **Multiple budget allotments** — as many as you need, each with a custom name,
   amount and period. A period can be a single day or an inclusive date range.
 - **Independent balances** — each allotment tracks its own spend and remaining
@@ -53,8 +66,12 @@ expense records on each render, so the screen cannot drift from the data.
 | Framework  | Next.js 15 (App Router)      |
 | Language   | TypeScript (strict)          |
 | Styling    | Tailwind CSS v4              |
-| State      | React Context + `useReducer` |
-| Storage    | `localStorage` behind a repository interface |
+| State      | React Context + server actions |
+| Auth       | Auth.js (NextAuth v5), Credentials + JWT cookie |
+| Hashing    | Argon2id (`@node-rs/argon2`) |
+| Database   | PostgreSQL, parameterised SQL |
+| Validation | Zod, server-side authoritative |
+| Email      | Resend (console fallback in development) |
 | PDF        | jsPDF + jspdf-autotable      |
 | Tests      | Vitest                       |
 | Deployment | Vercel                       |
@@ -65,99 +82,158 @@ Requires Node.js 20 or newer.
 
 ```bash
 npm install
+cp .env.example .env.local     # then fill in DATABASE_URL and AUTH_SECRET
+npm run db:migrate             # creates the tables
 npm run dev
 ```
 
-Open http://localhost:3000.
+Open http://localhost:3000, create an account, and follow the verification link.
+Without an email provider configured the link is printed to the server console
+instead of being sent — enough to complete the flow locally.
+
+### No Postgres to hand?
+
+Set `DATABASE_URL="pglite://./.pgdata"` and skip `db:migrate`. That runs PGlite,
+real Postgres compiled to WASM, inside the server process and creates the schema
+on first use. It is a development convenience only: one process owns the data
+and nothing else can connect to it.
 
 ## Scripts
 
-| Script              | What it does                          |
-| ------------------- | ------------------------------------- |
-| `npm run dev`       | Start the development server           |
-| `npm run build`     | Production build                       |
-| `npm start`         | Serve the production build             |
-| `npm run lint`      | ESLint                                 |
-| `npm run typecheck` | `tsc --noEmit`                         |
-| `npm test`          | Run the unit tests once                |
-| `npm run test:watch`| Run the unit tests in watch mode       |
+| Script               | What it does                          |
+| -------------------- | ------------------------------------- |
+| `npm run dev`        | Start the development server           |
+| `npm run build`      | Production build                       |
+| `npm start`          | Serve the production build             |
+| `npm run db:migrate` | Apply the database schema              |
+| `npm run lint`       | ESLint                                 |
+| `npm run typecheck`  | `tsc --noEmit`                         |
+| `npm test`           | Run the unit and integration tests once|
+| `npm run test:watch` | Run the tests in watch mode            |
 
 ## Environment variables
 
-**None.** The app runs entirely in the browser and stores its data in
-`localStorage`, so there is nothing to configure and no secrets to keep. No
-`.env` file is needed for local development or for deployment.
+Copy `.env.example` to `.env.local`. Nothing secret is committed — `.env` and
+`.env*.local` are gitignored, and `.env.example` contains names only.
 
-If you later swap the storage layer for a hosted database (see below), add the
-credentials as Vercel environment variables and read them server-side — never
-commit them, and never expose them through a `NEXT_PUBLIC_` variable.
+| Variable | Required | Purpose |
+| -------- | -------- | ------- |
+| `DATABASE_URL` | yes | PostgreSQL connection string. `pglite://<path>` runs the embedded development database instead. |
+| `AUTH_SECRET` | yes | Signs and encrypts the session cookie. Generate with `npx auth secret`. |
+| `APP_URL` | no | Base URL for the links inside emails. Detected automatically on Vercel. |
+| `RESEND_API_KEY` | no | Sends real email. Without it, links are logged to the server console. |
+| `EMAIL_FROM` | no | Sender address, required alongside `RESEND_API_KEY`. |
+| `DATABASE_POOL_MAX` | no | Connections per instance (default 5). |
+| `DATABASE_POOL_IDLE_MS` | no | Idle connection lifetime (default 10000; `0` keeps them open). |
+
+Until `DATABASE_URL` and `AUTH_SECRET` are set the app serves a "Setup required"
+page rather than failing with a stack trace.
 
 ## Project structure
 
 ```
 app/
-├── layout.tsx          # Root layout, providers, metadata
-├── page.tsx            # Tracker route
-├── budgets/page.tsx    # Budgets route
-├── history/page.tsx    # History route
-├── error.tsx           # Error boundary with a recovery action
-├── not-found.tsx       # 404
-├── icon.svg            # Favicon
-└── globals.css         # Design tokens, theme, animations
+├── layout.tsx              # Root layout, toast provider, metadata
+├── page.tsx                # Routes to /tracker or /login
+├── login/ signup/          # Public: credentials
+├── verify-email/           # Public: redeem or resend a verification link
+├── forgot-password/        # Public: request a reset link
+├── reset-password/         # Public: redeem a reset link
+├── tracker/ budgets/       # Protected
+├── history/ profile/       # Protected
+├── api/auth/[...nextauth]/ # Auth.js endpoints
+├── error.tsx  not-found.tsx
+└── globals.css
+
+middleware.ts               # Redirects unauthenticated visitors
+auth.ts                     # Auth.js instance (Node runtime)
 
 components/
-├── dashboard/
-│   ├── Dashboard.tsx        # Tracker screen; first-run, loading, active
-│   ├── CurrentBudgetCard.tsx# The allotment covering today
-│   ├── BudgetOverview.tsx   # "Your Budgets" at-a-glance list
-│   └── DashboardSkeleton.tsx
-├── budgets/
-│   ├── BudgetsView.tsx      # Create, review and manage allotments
-│   ├── BudgetCard.tsx       # One allotment's terms and balance
-│   ├── BudgetFormModal.tsx  # Create / edit, with the overlap guard
-│   ├── BudgetDetailModal.tsx
-│   └── BudgetStatusBadge.tsx
-├── expenses/
-│   ├── ExpenseList.tsx      # List, edit and delete flows
-│   ├── ExpenseItem.tsx      # A single row, labelled with its budget
-│   ├── ExpenseFormModal.tsx # Name, amount, date, budget + validation
-│   ├── AddExpenseModal.tsx
-│   ├── EditExpenseModal.tsx
-│   └── AddExpenseButton.tsx # Floating action button
-├── history/
-│   ├── HistoryView.tsx      # Filter → results → export
-│   ├── HistoryFilterBar.tsx # Presets, single date / range, validation
-│   ├── HistorySummaryCard.tsx
-│   ├── HistoryDayCard.tsx   # Collapsible day, named by budget
-│   └── ExportPdfButton.tsx  # Loads the PDF code on demand
-├── layout/
-│   └── AppShell.tsx         # Page frame + Tracker / Budgets / History nav
-├── providers/
-│   └── TrackerProvider.tsx  # Single source of truth
-└── ui/                      # Button, TextField, DateField, SelectField, …
+├── auth/                   # Sign-up, login, reset, resend, checklist, logout
+├── dashboard/ budgets/     # Tracker screens
+├── expenses/ history/
+├── layout/                 # AppShell, SetupRequired
+├── providers/              # TrackerData (server) + TrackerProvider (client)
+└── ui/
 
 lib/
-├── calculations.ts     # Totals, balances, sorting — all money maths
-├── dates.ts            # Calendar-day keys, ranges, overlap detection
-├── budgets.ts          # Status, per-budget summaries, date resolution
-├── history.ts          # Derived day records, filtering, summaries
-├── validation.ts       # Budget and expense rules
-├── currency.ts         # Peso formatting, parsing, rounding
-├── storage.ts          # Repository interface + localStorage implementation
-├── utils.ts            # Dates, ids, class names
-├── pdf/
-│   ├── report.ts       # PDF document builder
-│   └── font.ts         # Generated font subset (see scripts/)
-└── __tests__/          # Unit tests
+├── auth/
+│   ├── schemas.ts          # Authoritative Zod rules, shared with the forms
+│   ├── password.ts         # Argon2id hashing and verification
+│   ├── tokens.ts           # CSPRNG tokens, stored only as SHA-256 hashes
+│   ├── service.ts          # Register, authenticate, verify, reset
+│   ├── auth.config.ts      # Edge-safe half, used by the middleware
+│   └── routes.ts           # Which routes are public or protected
+├── db/
+│   ├── client.ts           # Pool, retries, embedded dev database
+│   ├── users.ts            # The only place a password hash is read
+│   ├── tokens.ts           # Single-use redemption in one atomic UPDATE
+│   └── tracker.ts          # Budgets and expenses, always filtered by user
+├── email/                  # Templates and delivery
+├── server/
+│   ├── auth-actions.ts     # Trust boundary for the auth forms
+│   ├── tracker-actions.ts  # Trust boundary for budget/expense writes
+│   ├── session.ts          # Resolves the caller from the session cookie
+│   └── rate-limit.ts
+├── budgets.ts  history.ts  calculations.ts  dates.ts
+├── currency.ts  validation.ts  utils.ts
+├── pdf/                    # Report builder and generated font subset
+└── __tests__/
 
-types/
-├── budget.ts           # Budget allotment types
-├── expense.ts          # Expense types
-└── history.ts          # History reporting types
-
-scripts/
-└── build-pdf-font.py   # Regenerates lib/pdf/font.ts
+db/migrations/001_init.sql  # Schema
+scripts/migrate.mjs         # npm run db:migrate
+types/                      # budget, expense, history, next-auth
 ```
+
+### Security notes
+
+**Email verification gates both doors.** An unverified account cannot log in,
+and cannot reset its password either. Allowing a reset would let whoever
+registered an address they do not control take the account over through the
+reset flow, bypassing verification entirely — so a reset request for an
+unverified address quietly sends a *verification* link instead.
+
+**Passwords.** Argon2id at the OWASP baseline (19 MiB, 2 iterations, 1 lane),
+via a vetted implementation rather than anything hand-rolled. A password is
+never trimmed or rewritten before hashing, because altering it would change the
+secret the user chose. It is never logged, never returned, and the hash is read
+by exactly one function (`findUserCredentials`); everything else works with a
+public user shape that has no hash on it.
+
+**Tokens.** 256 bits from the CSPRNG, handed to the email once and stored only
+as a SHA-256 hash — reading the database cannot verify an address or seize an
+account. Redemption is a single conditional `UPDATE` that tests "not expired and
+not yet consumed" and marks it consumed in the same statement, so two clicks on
+one link cannot both succeed. Verification links last 24 hours, reset links 1
+hour, and issuing a new one retires the old.
+
+**Enumeration.** Login answers "Invalid email or password" whether or not the
+address exists, and an unknown address still pays for a hash comparison so the
+response time does not give it away. Forgot-password and resend-verification
+always give the same answer. The one place a duplicate address is named is
+sign-up, where the person typed it themselves.
+
+**Sessions.** An encrypted, HTTP-only, SameSite=Lax cookie — no token in
+`localStorage` or `sessionStorage`, and nothing readable from `document.cookie`.
+Auth.js also supplies CSRF protection on its own endpoints.
+
+**Server-side validation is the only validation that counts.** The forms import
+the same Zod schemas purely so the user sees an error immediately; every server
+action re-parses its raw input before touching the database. Gender is checked
+against a fixed list in the schema *and* by a `CHECK` constraint in the table.
+
+**Data isolation.** Server actions never accept a user id from the client — it
+comes from the session cookie, and every statement filters on it. A request
+naming another account's budget matches no rows and reads as "not found". This
+is covered by tests that have one user try to read, update and delete another's
+budgets and expenses.
+
+**Rate limiting.** Fixed-window counters on sign-up, login, verification,
+resend, forgot-password and reset. Login is limited per IP *and* per address, so
+spreading guesses across clients does not lift the limit. The counters live in
+process memory, which means the limit is per instance on a multi-instance
+deployment — `lib/server/rate-limit.ts` is where a Redis counter would go, with
+no change at the call sites.
 
 ### Architecture notes
 
@@ -166,19 +242,11 @@ from `lib/calculations.ts`; no component does its own arithmetic. The validation
 rules in `lib/validation.ts` are pure functions with no React dependency, so the
 same rules can be reused by a server if one is added.
 
-**The data layer is swappable.** Components never touch `localStorage`. They go
-through `TrackerRepository` (`lib/storage.ts`), whose methods are async so that
-replacing the browser implementation with an API client is a drop-in change:
-
-```ts
-const remoteRepository: TrackerRepository = {
-  async load() { return (await fetch("/api/tracker")).json(); },
-  async save(state) { await fetch("/api/tracker", { method: "PUT", body: JSON.stringify(state) }); },
-  async clear() { await fetch("/api/tracker", { method: "DELETE" }); },
-};
-
-<TrackerProvider repository={remoteRepository}>…</TrackerProvider>
-```
+**The server is authoritative.** The client provider holds a copy of the
+signed-in user's budgets and expenses for rendering, but every mutation goes
+through a server action that re-validates the request and resolves the owner
+from the session. Nothing is written locally and hoped for: if the server
+refuses, local state does not change and the reason is shown.
 
 **Only source data is persisted** — the budget and the expense array. Derived
 values like the current balance are deliberately not stored.
@@ -223,47 +291,35 @@ total allocated and a total remaining.
 
 ## Stored data
 
-```jsonc
-{
-  "version": 3,
-  "budgets": [
-    {
-      "id": "b1e7…",
-      "name": "August Week 1",
-      "amount": 5000,
-      "startDate": "2026-08-01",   // inclusive
-      "endDate": "2026-08-05",     // inclusive; equals startDate for one day
-      "createdAt": "2026-08-01T02:00:00.000Z",
-      "updatedAt": "2026-08-01T02:00:00.000Z",
-      "locked": true
-    }
-  ],
-  "expenses": [
-    {
-      "id": "9f2c…",
-      "budgetId": "b1e7…",         // by id, so renaming is safe
-      "name": "Food",
-      "amount": 500,
-      "expenseDate": "2026-08-01", // decides which budget applies
-      "createdAt": "2026-08-01T04:30:00.000Z",
-      "updatedAt": "2026-08-01T04:30:00.000Z"
-    }
-  ]
-}
+PostgreSQL, defined in `db/migrations/001_init.sql`:
+
+```
+users                      (id, name, gender, email, password_hash,
+                            email_verified_at, created_at, updated_at)
+email_verification_tokens  (id, user_id, token_hash, expires_at, consumed_at)
+password_reset_tokens      (id, user_id, token_hash, expires_at, consumed_at)
+budgets                    (id, user_id, name, amount_centavos,
+                            start_date, end_date, locked, …)
+expenses                   (id, user_id, budget_id, name, amount_centavos,
+                            expense_date, …)
 ```
 
-Stored under the key `expense-tracker:v3`. Only source data is persisted —
-balances, statuses and the whole of History are derived on demand.
+Two deliberate choices in the schema:
 
-On load the payload is validated field by field: malformed JSON falls back to an
-empty state, a budget with no usable period is dropped, a reversed period is
-repaired, and an expense pointing at a budget that no longer exists is discarded
-rather than left with no balance to belong to.
+- **Money is integer centavos**, never a float, so the database cannot
+  reintroduce the drift the application already guards against.
+- **Calendar dates are `YYYY-MM-DD` text**, not `DATE`. Budget periods and
+  expense dates are calendar concepts in the user's timezone; a `DATE` column
+  round-tripped through a driver invites an off-by-one-day bug, and zero-padded
+  text sorts chronologically anyway.
 
-A `v1` or `v2` payload (one global budget, no periods) is migrated on first
-load into a single allotment named **Original Budget**, spanning the days the
-old tracker covered and staying open through today. Every existing expense is
-attached to it. Rename or re-scope it like any other budget.
+Email is stored lowercased and trimmed with a unique index, which is what makes
+uniqueness case-insensitive and stops two accounts sharing an address even under
+a race. Deleting a user cascades to their tokens, budgets and expenses.
+
+Data from the pre-account versions of the app lived in `localStorage` and
+belongs to no user, so it is not carried across; that storage layer has been
+removed.
 
 ## Testing
 
@@ -271,14 +327,29 @@ attached to it. Rename or re-scope it like any other budget.
 npm test
 ```
 
-The suite covers the date, budget, calculation, currency, validation, history
-and PDF layers — per-budget balances and their independence from one another,
-statuses, overlap detection including shared endpoints, single-day and
-inclusive-range periods, date-to-budget resolution (and the refusal to resolve
-when several budgets match), rounding across many fractional amounts, the
-overdraft check, migration from the single-budget formats, recovery from
-corrupted data, filtering, and PDF generation including pagination of large
-datasets.
+The suite runs against a real database: PGlite executes the actual Postgres
+engine in-process, so constraints, error codes and SQL semantics behave exactly
+as they will in production — the queries under test are the queries that ship.
+
+Alongside the budget, history, currency and PDF coverage, the security-critical
+paths are tested directly:
+
+- **Registration** — valid input, every missing or malformed field, duplicate
+  email (enforced by the unique index, not a prior `SELECT`), weak passwords,
+  mismatched confirmation, gender outside the allowed set, markup and control
+  characters in the name.
+- **Verification** — a valid token, an unknown one, an expired one, a replayed
+  one, and a superseded one; resend saying nothing about unknown or
+  already-verified addresses.
+- **Login** — verified success, wrong password, unknown address, and the
+  unverified account being refused even with the correct password.
+- **Password reset** — refused for an unverified account (which receives a
+  verification link instead), single-use and superseded tokens, a verification
+  token rejected as a reset token, and the old password ceasing to work.
+- **Authorization** — one user attempting to read, update and delete another's
+  budgets and expenses, and to attach an expense to a budget they do not own.
+- **Rate limiting** — limits reached, keys and actions counted separately, and
+  the window reopening.
 
 ### Regenerating the PDF font
 
@@ -303,17 +374,23 @@ npm run build
 
 ## Deployment
 
-The app deploys to Vercel with no configuration beyond the defaults.
+The app needs a PostgreSQL database and an auth secret before accounts work.
 
-1. Push this repository to GitHub.
-2. In Vercel, choose **Add New → Project** and import the repository.
-3. Vercel detects Next.js and fills in the build settings; `vercel.json` pins
-   them explicitly. There are no environment variables to add.
+1. Provision Postgres — Neon, Supabase, Vercel Postgres or anything else that
+   speaks the protocol.
+2. In Vercel → Settings → Environment Variables, set `DATABASE_URL` and
+   `AUTH_SECRET` (`npx auth secret` generates one). Add `RESEND_API_KEY` and
+   `EMAIL_FROM` to send real email; without them, verification and reset links
+   are only written to the server log.
+3. Apply the schema once: `DATABASE_URL=... npm run db:migrate`.
 4. Deploy.
 
-Once the repository is connected, deployments are automatic: every push to
-`main` publishes to production, and every pull request gets its own preview
-deployment.
+Every push to the default branch publishes to production, and every pull request
+gets its own preview deployment.
+
+Until `DATABASE_URL` and `AUTH_SECRET` are present the deployment serves a
+"Setup required" page: the build succeeds and the site stays up, but no account
+can be created until they are set.
 
 ## Licence
 
