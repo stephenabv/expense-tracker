@@ -21,7 +21,11 @@ if (!connectionString) {
   process.exit(1);
 }
 
-const sql = readFileSync(join(process.cwd(), "db", "migrations", "001_init.sql"), "utf8");
+const MIGRATIONS = ["001_init.sql", "002_restrict_api_roles.sql"];
+
+const sql = MIGRATIONS.map((file) =>
+  readFileSync(join(process.cwd(), "db", "migrations", file), "utf8"),
+).join("\n\n");
 
 const client = new pg.Client({
   connectionString,
@@ -33,7 +37,33 @@ const client = new pg.Client({
 try {
   await client.connect();
   await client.query(sql);
-  console.log("Schema applied.");
+
+  // Report the guard that matters most, so a misconfigured host is obvious.
+  const { rows } = await client.query(
+    `SELECT relname, relrowsecurity FROM pg_class
+      WHERE relkind = 'r'
+        AND relname IN ('users', 'email_verification_tokens',
+                        'password_reset_tokens', 'budgets', 'expenses')
+      ORDER BY relname`,
+  );
+
+  console.log("Schema applied.\n");
+  for (const row of rows) {
+    console.log(
+      `  ${row.relrowsecurity ? "\u2713" : "\u2717"} ${row.relname}` +
+        `${row.relrowsecurity ? "" : "  <-- row level security is OFF"}`,
+    );
+  }
+
+  const unprotected = rows.filter((row) => !row.relrowsecurity);
+  if (unprotected.length > 0) {
+    console.error(
+      "\nSome tables have row level security disabled. On a host that exposes " +
+        "Postgres over HTTP (Supabase and similar), those tables would be " +
+        "readable with the public API key.",
+    );
+    process.exitCode = 1;
+  }
 } catch (error) {
   console.error("Migration failed:", error.message);
   process.exitCode = 1;

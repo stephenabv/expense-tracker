@@ -91,6 +91,41 @@ Open http://localhost:3000, create an account, and follow the verification link.
 Without an email provider configured the link is printed to the server console
 instead of being sent — enough to complete the flow locally.
 
+### Using Supabase for the database
+
+Supabase is just PostgreSQL here — this app does not use its JavaScript client,
+its data API or its auth service, so `@supabase/supabase-js` and `@supabase/ssr`
+are not needed and the publishable/anon key plays no part.
+
+1. Supabase dashboard → **Connect** → **Connection string**.
+2. For a serverless deployment such as Vercel, use the **Transaction pooler**
+   URI (port `6543`) and set `DATABASE_POOL_MAX=1`, since each function instance
+   opens its own pool. For running migrations from your machine, the **Session
+   pooler** (port `5432`) is simpler.
+3. Put it in `DATABASE_URL` — the password is the database password, which is
+   not the same as any API key.
+4. Run `npm run db:migrate`.
+
+```bash
+DATABASE_URL="postgresql://postgres.<project-ref>:<db-password>@aws-0-<region>.pooler.supabase.com:5432/postgres" \
+  npm run db:migrate
+```
+
+**Why migration `002` exists.** Supabase serves every table in the `public`
+schema over HTTP through PostgREST, and grants its `anon` and `authenticated`
+roles table privileges by default. Tables created by a raw SQL migration have
+row level security switched **off**. Left alone, that combination would let
+anyone holding the browser-facing publishable key read `users.password_hash`,
+overwrite it, and list outstanding reset tokens — with the key behaving exactly
+as designed, because that key is only ever as safe as the RLS behind it.
+
+So `002_restrict_api_roles.sql` enables RLS on all five tables, defines **no**
+policies, and revokes the API roles' privileges outright. The application is
+unaffected: it connects directly as the owning role, which bypasses RLS. The
+migration is idempotent and a no-op on a Postgres server with no such roles, and
+`npm run db:migrate` prints the RLS state of every table so a misconfigured host
+is visible immediately.
+
 ### No Postgres to hand?
 
 Set `DATABASE_URL="pglite://./.pgdata"` and skip `db:migrate`. That runs PGlite,

@@ -183,34 +183,70 @@ function isTransientConnectionError(error: unknown): boolean {
   );
 }
 
-/** The schema, as SQL. Applied by `npm run db:migrate` and by the tests. */
-export function readMigration(): string {
-  return readFileSync(
-    join(process.cwd(), "db", "migrations", "001_init.sql"),
-    "utf8",
-  );
+/** Migration files, in the order they must be applied. */
+export const MIGRATIONS = ["001_init.sql", "002_restrict_api_roles.sql"] as const;
+
+/** One migration's SQL. */
+export function readMigration(file: string): string {
+  return readFileSync(join(process.cwd(), "db", "migrations", file), "utf8");
 }
 
-/** Creates the schema if it is not already present. Safe to run repeatedly. */
+/** Every migration concatenated, for drivers that accept a multi-statement script. */
+export function readAllMigrations(): string {
+  return MIGRATIONS.map(readMigration).join("\n\n");
+}
+
+/** Applies the schema. Every statement is idempotent, so repeat runs are safe. */
 export async function migrate(db: SqlExecutor = getDatabase()): Promise<void> {
-  const sql = readMigration();
-  // The migration is a single idempotent script; split so drivers that reject
-  // multi-statement strings still work.
-  for (const statement of splitStatements(sql)) {
-    await db.query(statement);
+  for (const file of MIGRATIONS) {
+    // Split so drivers that reject multi-statement strings still work.
+    for (const statement of splitStatements(readMigration(file))) {
+      await db.query(statement);
+    }
   }
 }
 
-/** Splits a SQL script on top-level semicolons, ignoring comments. */
+/**
+ * Splits a SQL script into statements.
+ *
+ * Semicolons inside a dollar-quoted block (`$$ ... $$`) belong to the block, not
+ * to the script, so the splitter tracks whether it is inside one. Splitting
+ * naively on every semicolon would tear a DO block into fragments that are not
+ * valid SQL on their own.
+ */
 export function splitStatements(sql: string): string[] {
-  return sql
-    .split(/;\s*$/m)
-    .map((statement) =>
-      statement
-        .split("\n")
-        .filter((line) => !line.trim().startsWith("--"))
-        .join("\n")
-        .trim(),
-    )
-    .filter((statement) => statement.length > 0);
+  const statements: string[] = [];
+  let current = "";
+  // The tag of the dollar-quoted block we are inside, or null at top level.
+  // Tags can be named (`$do$`) as well as bare (`$$`), and only the matching
+  // tag closes a block.
+  let openTag: string | null = null;
+
+  const TAG = /\$[A-Za-z_][A-Za-z0-9_]*\$|\$\$/g;
+
+  for (const rawLine of sql.split("\n")) {
+    const line = rawLine.trim().startsWith("--") ? "" : rawLine;
+
+    TAG.lastIndex = 0;
+    let match: RegExpExecArray | null;
+    while ((match = TAG.exec(line)) !== null) {
+      const tag = match[0];
+      if (openTag === null) openTag = tag;
+      else if (openTag === tag) openTag = null;
+    }
+
+    current += `${line}\n`;
+
+    if (openTag === null && /;\s*$/.test(line)) {
+      const statement = current.replace(/;\s*$/, "").trim();
+      if (statement) statements.push(statement);
+      current = "";
+    }
+  }
+
+  const tail = current.trim();
+  if (tail) statements.push(tail);
+
+  return statements;
 }
+
