@@ -415,16 +415,21 @@ npm run build
 The app needs a PostgreSQL database and an auth secret before accounts work.
 
 1. Provision Postgres — Neon, Supabase, Vercel Postgres or anything else that
-   speaks the protocol.
+   speaks the protocol. On a serverless host, use the provider's connection
+   pooler rather than a direct connection (Supabase: the transaction pooler on
+   port 6543) and set `DATABASE_POOL_MAX=1`, since every instance opens its own
+   pool.
 2. In Vercel → Settings → Environment Variables, set `DATABASE_URL` and
    `AUTH_SECRET` (`npx auth secret` generates one). Add the `SMTP_*` variables and
    `EMAIL_FROM` to send real email; without them, verification and reset links
    are only written to the server log.
-3. Apply the schema once: `DATABASE_URL=... npm run db:migrate`.
+3. Apply the schema once: `DATABASE_URL=... npm run db:migrate`. This also
+   applies migration 002, which keeps the tables off a hosted data API.
 4. Deploy.
 
-Every push to the default branch publishes to production, and every pull request
-gets its own preview deployment.
+`main` is the production branch: every push to it publishes to production, and
+every pull request gets its own preview deployment. The branch is configured in
+Vercel under Settings → Environments → Production → Branch Tracking.
 
 Until `DATABASE_URL` and `AUTH_SECRET` are present the deployment serves a
 "Setup required" page: the build succeeds and the site stays up, but no account
