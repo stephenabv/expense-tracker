@@ -305,3 +305,211 @@ describe("tracker data isolation", () => {
     ).rejects.toBeTruthy();
   });
 });
+
+describe("budget allotments without a date restriction", () => {
+  const general = {
+    name: "Emergency Fund",
+    amount: 10_000,
+    startDate: null,
+    endDate: null,
+  };
+
+  it("stores and returns two nulls, not sentinel dates", async () => {
+    const user = await makeUser();
+    const budget = await insertBudget(user.id, general);
+
+    expect(budget.startDate).toBeNull();
+    expect(budget.endDate).toBeNull();
+
+    const [reloaded] = await listBudgets(user.id);
+    expect(reloaded.startDate).toBeNull();
+    expect(reloaded.endDate).toBeNull();
+    expect(reloaded.amount).toBe(10_000);
+  });
+
+  it("refuses a half-set period", async () => {
+    // One end without the other is not a period, and every read path would
+    // treat the row as unrestricted — silently dropping the date the user set.
+    const user = await makeUser();
+
+    await expect(
+      insertBudget(user.id, { ...general, startDate: "2026-08-01", endDate: null }),
+    ).rejects.toBeTruthy();
+
+    await expect(
+      insertBudget(user.id, { ...general, startDate: null, endDate: "2026-08-05" }),
+    ).rejects.toBeTruthy();
+  });
+
+  it("lists dated allotments before undated ones", async () => {
+    const user = await makeUser();
+    await insertBudget(user.id, general);
+    await insertBudget(user.id, {
+      name: "August",
+      amount: 5_000,
+      startDate: "2026-08-01",
+      endDate: "2026-08-05",
+    });
+
+    expect((await listBudgets(user.id)).map((b) => b.name)).toEqual([
+      "August",
+      "Emergency Fund",
+    ]);
+  });
+
+  it("converts a dated allotment to a general one and back", async () => {
+    const user = await makeUser();
+    const budget = await insertBudget(user.id, {
+      name: "August",
+      amount: 5_000,
+      startDate: "2026-08-01",
+      endDate: "2026-08-05",
+    });
+
+    const relaxed = await updateBudgetRow(user.id, budget.id, {
+      name: "August",
+      amount: 5_000,
+      startDate: null,
+      endDate: null,
+    });
+    expect(relaxed?.startDate).toBeNull();
+
+    const restored = await updateBudgetRow(user.id, budget.id, {
+      name: "August",
+      amount: 5_000,
+      startDate: "2026-08-01",
+      endDate: "2026-08-05",
+    });
+    expect(restored?.startDate).toBe("2026-08-01");
+    expect(restored?.endDate).toBe("2026-08-05");
+  });
+
+  it("funds an expense on any date", async () => {
+    const user = await makeUser();
+    const fund = await insertBudget(user.id, general);
+
+    for (const date of ["2026-08-03", "2026-12-25", "2027-01-01"]) {
+      const recorded = await insertExpense(user.id, {
+        budgetId: fund.id,
+        name: "Medicine",
+        amount: 100,
+        expenseDate: date,
+      });
+      expect(recorded?.budgetId).toBe(fund.id);
+    }
+
+    expect(await listExpenses(user.id)).toHaveLength(3);
+  });
+});
+
+describe("moving an expense between allotments", () => {
+  async function twoBudgets() {
+    const user = await makeUser();
+    const food = await insertBudget(user.id, {
+      name: "Food Budget",
+      amount: 5_000,
+      startDate: "2026-08-01",
+      endDate: "2026-08-05",
+    });
+    const fund = await insertBudget(user.id, {
+      name: "Emergency Fund",
+      amount: 10_000,
+      startDate: null,
+      endDate: null,
+    });
+    return { user, food, fund };
+  }
+
+  it("reverses the old deduction and applies the new one in one write", async () => {
+    const { user, food, fund } = await twoBudgets();
+
+    const recorded = await insertExpense(user.id, {
+      budgetId: food.id,
+      name: "Groceries",
+      amount: 500,
+      expenseDate: "2026-08-03",
+    });
+
+    const moved = await updateExpenseRow(user.id, recorded!.id, {
+      budgetId: fund.id,
+      name: "Groceries",
+      amount: 500,
+      expenseDate: "2026-08-03",
+    });
+    expect(moved?.budgetId).toBe(fund.id);
+
+    // The expense exists exactly once, charged to exactly one allotment: it is
+    // a single UPDATE, so it can neither hit both pots nor fall out of both.
+    const expenses = await listExpenses(user.id);
+    expect(expenses).toHaveLength(1);
+    expect(expenses.filter((e) => e.budgetId === food.id)).toHaveLength(0);
+    expect(expenses.filter((e) => e.budgetId === fund.id)).toHaveLength(1);
+  });
+
+  it("refuses to move an expense onto another account's budget", async () => {
+    const { user, food } = await twoBudgets();
+    const mallory = await makeUser("mallory@example.com");
+    const theirs = await insertBudget(mallory.id, {
+      name: "Their Budget",
+      amount: 9_000,
+      startDate: null,
+      endDate: null,
+    });
+
+    const recorded = await insertExpense(user.id, {
+      budgetId: food.id,
+      name: "Groceries",
+      amount: 500,
+      expenseDate: "2026-08-03",
+    });
+
+    expect(
+      await updateExpenseRow(user.id, recorded!.id, {
+        budgetId: theirs.id,
+        name: "Groceries",
+        amount: 500,
+        expenseDate: "2026-08-03",
+      }),
+    ).toBeNull();
+
+    // Untouched, and still on the original allotment.
+    const [unchanged] = await listExpenses(user.id);
+    expect(unchanged.budgetId).toBe(food.id);
+  });
+
+  it("refuses to create an expense on another account's budget", async () => {
+    const { user } = await twoBudgets();
+    const mallory = await makeUser("mallory@example.com");
+    const theirs = await insertBudget(mallory.id, {
+      name: "Their Budget",
+      amount: 9_000,
+      startDate: null,
+      endDate: null,
+    });
+
+    expect(
+      await insertExpense(user.id, {
+        budgetId: theirs.id,
+        name: "Sneaky",
+        amount: 100,
+        expenseDate: "2026-08-03",
+      }),
+    ).toBeNull();
+    expect(await listExpenses(mallory.id)).toHaveLength(0);
+  });
+
+  it("loads budgets and expenses together for one user only", async () => {
+    const { user, fund } = await twoBudgets();
+    await insertExpense(user.id, {
+      budgetId: fund.id,
+      name: "Medicine",
+      amount: 1_000,
+      expenseDate: "2026-09-01",
+    });
+
+    const data = await loadTrackerData(user.id);
+    expect(data.budgets).toHaveLength(2);
+    expect(data.expenses).toHaveLength(1);
+    expect(data.expenses[0].budgetId).toBe(fund.id);
+  });
+});

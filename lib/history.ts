@@ -27,7 +27,12 @@ import {
 } from "@/lib/dates";
 import { roundCurrency } from "@/lib/currency";
 import { calculateTotalExpenses, sortExpensesByNewest, sumAmounts } from "@/lib/calculations";
-import { expensesForBudget, sortBudgetsByPeriod } from "@/lib/budgets";
+import {
+  describeBudgetPeriodLong,
+  expensesForBudget,
+  isGeneralBudget,
+  sortBudgetsByPeriod,
+} from "@/lib/budgets";
 
 /* ------------------------------------------------------------------ filters */
 
@@ -58,7 +63,12 @@ export function validateFilter(filter: HistoryFilter): string | null {
   return null;
 }
 
-/** True when `date` falls inside the filter. Ranges include both endpoints. */
+/**
+ * True when `date` falls inside the filter's period.
+ *
+ * Deliberately date-only: the budget half of the filter is applied where whole
+ * records are available, since a date cannot say which budget it belongs to.
+ */
 export function matchesFilter(date: DateKey, filter: HistoryFilter): boolean {
   if (filter.mode === "all") return true;
   if (filter.mode === "single") return date === filter.date;
@@ -158,6 +168,8 @@ export function buildHistory(budgets: Budget[], expenses: Expense[]): HistoryDay
         budgetId: budget.id,
         budgetName: budget.name,
         budgetAmount: roundCurrency(budget.amount),
+        budgetStartDate: budget.startDate,
+        budgetEndDate: budget.endDate,
         startingBalance,
         endingBalance,
         totalExpenses,
@@ -176,13 +188,21 @@ export function sortHistoryDays(days: HistoryDay[]): HistoryDay[] {
   );
 }
 
-/** Applies a filter, returning matching days newest first for display. */
+/**
+ * Applies a filter, returning matching days newest first for display.
+ *
+ * Whatever this returns is exactly what the PDF prints, so the two can never
+ * disagree about what the user asked for.
+ */
 export function filterHistory(
   days: HistoryDay[],
   filter: HistoryFilter,
 ): HistoryDay[] {
+  const budgetId = filter.budgetId ?? null;
+
   return days
     .filter((day) => matchesFilter(day.date, filter))
+    .filter((day) => budgetId === null || day.budgetId === budgetId)
     .sort(
       (a, b) => b.date.localeCompare(a.date) || a.budgetId.localeCompare(b.budgetId),
     );
@@ -235,8 +255,12 @@ export function summarizeHistory(days: HistoryDay[]): HistorySummary {
 
       return {
         budgetId: first.budgetId,
+        // The latest label wins, so a renamed budget reports under its current
+        // name while every expense stays attached by id.
         budgetName: last.budgetName,
         budgetAmount: last.budgetAmount,
+        budgetStartDate: last.budgetStartDate,
+        budgetEndDate: last.budgetEndDate,
         totalExpenses: sumAmounts(budgetDays.map((day) => day.totalExpenses)),
         // The balance after the last day of this budget inside the range.
         remaining: last.endingBalance,
@@ -267,19 +291,51 @@ export function summarizeHistory(days: HistoryDay[]): HistorySummary {
   };
 }
 
-/** Budgets whose period intersects the filter, newest period first. */
+/**
+ * Budgets that could have funded spending inside the filter, newest first.
+ *
+ * A general allotment has no period to intersect and is available on every
+ * date, so it always qualifies.
+ */
 export function budgetsInFilter(
   budgets: Budget[],
   filter: HistoryFilter,
 ): Budget[] {
-  if (filter.mode === "all") return sortBudgetsByPeriod(budgets);
+  const selected = filter.budgetId ?? null;
+  const scoped =
+    selected === null
+      ? budgets
+      : budgets.filter((budget) => budget.id === selected);
+
+  if (filter.mode === "all") return sortBudgetsByPeriod(scoped);
 
   const start = filter.mode === "single" ? filter.date : filter.start;
   const end = filter.mode === "single" ? filter.date : filter.end;
 
   return sortBudgetsByPeriod(
-    budgets.filter(
-      (budget) => budget.startDate <= end && start <= budget.endDate,
+    scoped.filter(
+      (budget) =>
+        isGeneralBudget(budget) ||
+        (budget.startDate! <= end && start <= budget.endDate!),
     ),
   );
+}
+
+/**
+ * Label for the budget half of a filter, for report metadata.
+ *
+ * Returns null when every budget is included, so callers can omit the line
+ * rather than print "All budgets" where it adds nothing.
+ */
+export function describeBudgetFilter(
+  budgets: Budget[],
+  filter: HistoryFilter,
+): string | null {
+  const selected = filter.budgetId ?? null;
+  if (selected === null) return null;
+
+  const budget = budgets.find((entry) => entry.id === selected);
+  if (!budget) return null;
+
+  return `${budget.name} (${describeBudgetPeriodLong(budget)})`;
 }

@@ -184,7 +184,11 @@ function isTransientConnectionError(error: unknown): boolean {
 }
 
 /** Migration files, in the order they must be applied. */
-export const MIGRATIONS = ["001_init.sql", "002_restrict_api_roles.sql"] as const;
+export const MIGRATIONS = [
+  "001_init.sql",
+  "002_restrict_api_roles.sql",
+  "003_optional_budget_period.sql",
+] as const;
 
 /** One migration's SQL. */
 export function readMigration(file: string): string {

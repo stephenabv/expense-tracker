@@ -27,7 +27,7 @@ import {
   updateExpenseRow,
 } from "@/lib/db/tracker";
 import { validateBudgetForm, validateExpenseForm } from "@/lib/validation";
-import { budgetsForDate, isCompleted } from "@/lib/budgets";
+import { budgetApplicability, budgetsForDate, isCompleted } from "@/lib/budgets";
 import { isDatabaseConfigured } from "@/lib/db/client";
 
 export type ActionResult<T> =
@@ -65,15 +65,14 @@ export async function createBudgetAction(
   const userId = await getUserId();
   if (!userId) return UNAUTHENTICATED;
 
-  // The overlap rule is re-checked against this user's own budgets, because the
-  // browser's copy of them is not authoritative.
-  const existing = await listBudgets(userId);
+  // Applicability is derived from the dates the client sent rather than trusted
+  // as a separate field, so the stored row and its declared type cannot drift.
   const result = validateBudgetForm(
     input.name,
     String(input.amount),
-    input.startDate,
-    input.endDate,
-    { budgets: existing },
+    budgetApplicability(input),
+    input.startDate ?? "",
+    input.endDate ?? "",
   );
 
   if (!result.ok) {
@@ -108,9 +107,9 @@ export async function updateBudgetAction(
   const result = validateBudgetForm(
     input.name,
     String(input.amount),
-    input.startDate,
-    input.endDate,
-    { budgets: existing, excludeId: budgetId },
+    budgetApplicability(input),
+    input.startDate ?? "",
+    input.endDate ?? "",
   );
 
   if (!result.ok) {
@@ -163,10 +162,14 @@ async function validateExpenseAgainstServer(
   input: ExpenseInput,
   excludeExpenseId?: string,
 ): Promise<{ ok: true } | { ok: false; error: string }> {
+  // Only this user's budgets are ever loaded, so a budget id belonging to
+  // another account is simply absent from the eligible list and is refused
+  // below — the check cannot be forgotten because there is nothing else to
+  // match against.
   const { budgets, expenses } = await loadTrackerData(userId);
-  const applicable = budgetsForDate(budgets, input.expenseDate);
+  const eligible = budgetsForDate(budgets, input.expenseDate);
 
-  const budget = applicable.find((entry) => entry.id === input.budgetId);
+  const budget = eligible.find((entry) => entry.id === input.budgetId);
   const own = budget
     ? expenses.filter(
         (expense) =>
@@ -183,7 +186,7 @@ async function validateExpenseAgainstServer(
     String(input.amount),
     input.expenseDate,
     input.budgetId,
-    { applicableBudgets: applicable, availableBalance },
+    { eligibleBudgets: eligible, availableBalance },
   );
 
   if (!result.ok) {

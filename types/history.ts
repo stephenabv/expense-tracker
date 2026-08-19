@@ -14,10 +14,17 @@ import type { Expense } from "@/types/expense";
 /** One calendar day's activity within one budget. */
 export interface HistoryDay {
   date: DateKey;
-  /** The budget these expenses were charged to. */
+  /**
+   * The budget these expenses were charged to. The relationship is by id, so a
+   * later rename changes the label the report prints without ever moving an
+   * expense to a different pot.
+   */
   budgetId: string;
   budgetName: string;
   budgetAmount: number;
+  /** The budget's own applicable period; `null` when it has no date restriction. */
+  budgetStartDate: DateKey | null;
+  budgetEndDate: DateKey | null;
   /** That budget's balance entering the day. */
   startingBalance: number;
   /** That budget's balance after the day: `startingBalance - totalExpenses`. */
@@ -28,11 +35,21 @@ export interface HistoryDay {
   expenses: Expense[];
 }
 
-/** The active filter driving the history view and any export. */
-export type HistoryFilter =
+/**
+ * The active filter driving the history view and any export.
+ *
+ * `budgetId` narrows the same selection to one allotment. It rides along with
+ * the date modes rather than replacing them, because the two are independent:
+ * a user can ask for "August 1–19" or "August 1–19, Emergency Fund only".
+ */
+export type HistoryFilter = (
   | { mode: "all" }
   | { mode: "single"; date: DateKey }
-  | { mode: "range"; start: DateKey; end: DateKey };
+  | { mode: "range"; start: DateKey; end: DateKey }
+) & {
+  /** Restrict to one budget, by id. Omitted or null means every budget. */
+  budgetId?: string | null;
+};
 
 export type HistoryPreset =
   | "today"
@@ -48,6 +65,9 @@ export interface HistoryBudgetSummary {
   budgetName: string;
   /** The budget's full allotment. */
   budgetAmount: number;
+  /** The budget's own applicable period; `null` when unrestricted. */
+  budgetStartDate: DateKey | null;
+  budgetEndDate: DateKey | null;
   /** Spend inside the selected period only. */
   totalExpenses: number;
   /** The budget's balance after the last in-range day. */

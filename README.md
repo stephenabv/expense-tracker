@@ -9,9 +9,17 @@ Every account's data is its own: budgets and expenses are stored in PostgreSQL
 against the owner's id, and every query filters on the id resolved from the
 session cookie.
 
-A **budget allotment** is one independent financial period: its own name, its
-own amount, its own inclusive date range, and its own expenses. It is not a
-label on a shared pot.
+A **budget allotment** is an independent source of funds: its own name, its own
+amount, and its own expenses. It is not a label on a shared pot. An allotment
+either applies to the calendar or it does not:
+
+```
+Food Budget       ₱5,000    August 1–5, 2026   (a date range)
+Daily Allowance   ₱1,000    August 6, 2026     (a single date)
+Emergency Fund   ₱10,000    No Specific Date   (no date restriction)
+```
+
+Every expense names the allotment it is deducted from.
 
 ```
 Budget Balance = Budget Amount − Sum(That Budget's Expenses)
@@ -31,16 +39,25 @@ expense records on each render, so the screen cannot drift from the data.
 - **Per-user data** — the tracker, budgets and history are scoped to the signed
   in account. Ownership is enforced in SQL, not by a check that could be
   skipped.
-- **Multiple budget allotments** — as many as you need, each with a custom name,
-  amount and period. A period can be a single day or an inclusive date range.
+- **Multiple budget allotments** — as many as you need, each with a custom name
+  and amount. An allotment can cover a single date, an inclusive date range, or
+  no date at all.
+- **General allotments** — a budget with no date restriction is stored with two
+  null dates, never sentinel values like `1900-01-01`. It can fund an expense on
+  any date and never expires with the calendar.
 - **Independent balances** — each allotment tracks its own spend and remaining
   balance. Nothing one budget does can move another's numbers.
-- **Date-driven assignment** — an expense's date decides which allotment pays
-  for it. Periods are not allowed to overlap, so that resolution is never a
-  guess; when no budget covers a date the app says so and offers to create one
-  rather than charging an unrelated allotment.
-- **Statuses** — Active, Upcoming, Completed and Over budget, derived from the
-  period and the spending.
+- **Explicit expense assignment** — the expense date narrows the options to the
+  allotments that can actually fund it (those covering the date, plus every
+  general one), and the user picks which pays. One option is selected
+  automatically because there is nothing to decide; two or more are never
+  resolved for the user. When nothing is available the app says so and offers to
+  create a budget rather than charging an unrelated allotment.
+- **Safe reassignment** — changing an expense's date re-derives the options and
+  drops a budget that no longer applies. Moving an expense between allotments is
+  a single write, so it can neither be deducted twice nor fall out of both.
+- **Statuses** — Active, Upcoming, Completed, Over budget, and No Date
+  Restriction, derived from the applicability and the spending.
 - **Per-budget locking** — a new allotment is locked; unlocking and editing one
   leaves every other untouched. Completed periods are immutable.
 - **Expense management** — add, edit and delete expenses, each with a name,
@@ -48,11 +65,13 @@ expense records on each render, so the screen cannot drift from the data.
 - **Overspending protection** — an expense larger than *its own* budget's
   balance is blocked, with the shortfall spelled out.
 - **History** — filterable by a single date or an inclusive range, with presets,
-  grouped by day and labelled with the budget that paid for each day.
-- **PDF export** — a real, paginated document with a per-budget summary and a
-  day-by-day breakdown, containing exactly the days the filter selected.
-- **Persistence** — saved to `localStorage` and migrated forward automatically
-  from earlier single-budget versions. Corrupted data is repaired, not fatal.
+  and narrowable to one allotment. Days are grouped and labelled with the budget
+  that paid for each.
+- **PDF export** — a real, paginated document with a per-budget summary that
+  names each allotment's own applicability, and a day-by-day breakdown grouped
+  by date and then by budget. It contains exactly what the filter selected.
+- **Persistence** — budgets and expenses live in PostgreSQL, scoped to the
+  signed-in account, and every mutation is re-validated on the server.
 - **Peso formatting** — `Intl.NumberFormat` throughout; money is summed in whole
   centavos so repeated addition never drifts.
 - **Responsive and accessible** — mobile-first, with bottom-sheet dialogs on
@@ -294,11 +313,22 @@ an `allowOverdraft` option (default `false`, via
 `ALLOW_OVERDRAFT_BY_DEFAULT`). Supporting negative balances later means flipping
 that flag rather than reworking the forms.
 
-**Overlapping periods are prevented, not resolved later.** If two allotments
-could claim the same day, every expense on that day becomes a question the app
-has to ask or guess at. The clash is blocked in the budget form — the one moment
-the user can still change the dates cheaply — so expense entry stays unambiguous
-forever after. `findOverlaps` reports which budget clashes and on which days.
+**The expense names its budget; nothing infers it.** An earlier version resolved
+an expense to an allotment by date, which forced periods not to overlap — with
+two candidates the app would have had to guess. Expenses now carry a `budget_id`
+chosen at entry, so overlap is a choice rather than a contradiction, and the
+no-overlap rule is gone. It had to go: a general allotment covers every day, and
+under the old rule it could never have existed alongside anything.
+
+`findOverlaps` survives as advice — the budget form still points out that
+another allotment shares those dates — but it no longer blocks. General
+allotments are excluded from it, since flagging a budget that applies to every
+day would flag every budget the user owns.
+
+**No allotment is ever selected on the user's behalf when there is a choice.**
+One eligible budget is filled in automatically and named on screen. If a date
+change brings a second into play, even a previously auto-filled selection is
+cleared: it was never a decision the user made.
 
 **Completed budgets are immutable, and that is what guarantees history.** Once a
 period has ended its amount, dates and name are frozen. Any report over past
@@ -323,13 +353,17 @@ cannot break an association or a historical record.
 
 **Summaries do not add up what should not be added.** Within one budget, the
 balance is a point-in-time value and is never summed across days: the per-budget
-`remaining` is the balance as of the last day in range. Across budgets, those
-independent pots *are* summed, because separate allotments really do add up to a
-total allocated and a total remaining.
+`remaining` is the balance as of the last day in range.
+
+Across budgets, *spending* adds up and is labelled "Total Expenses Across
+Budgets". A combined **balance** is not offered anywhere — not on the dashboard,
+not in the summary card, not in the PDF. ₱3,200 of food money plus ₱8,000 of
+emergency money is not ₱11,200 of anything the user can spend, so remaining
+balances are only ever reported per allotment.
 
 ## Stored data
 
-PostgreSQL, defined in `db/migrations/001_init.sql`:
+PostgreSQL, defined in `db/migrations/`:
 
 ```
 users                      (id, name, gender, email, password_hash,
@@ -338,6 +372,8 @@ email_verification_tokens  (id, user_id, token_hash, expires_at, consumed_at)
 password_reset_tokens      (id, user_id, token_hash, expires_at, consumed_at)
 budgets                    (id, user_id, name, amount_centavos,
                             start_date, end_date, locked, …)
+                            -- start_date/end_date are NULL together for an
+                            -- allotment with no date restriction
 expenses                   (id, user_id, budget_id, name, amount_centavos,
                             expense_date, …)
 ```
@@ -346,6 +382,10 @@ Two deliberate choices in the schema:
 
 - **Money is integer centavos**, never a float, so the database cannot
   reintroduce the drift the application already guards against.
+- **A budget period is nullable, and both ends move together.** A CHECK
+  constraint enforces `(start_date IS NULL) = (end_date IS NULL)`: a half-set
+  period is not a period, and every read path would treat such a row as
+  unrestricted — silently discarding the date the user set.
 - **Calendar dates are `YYYY-MM-DD` text**, not `DATE`. Budget periods and
   expense dates are calendar concepts in the user's timezone; a `DATE` column
   round-tripped through a driver invites an off-by-one-day bug, and zero-padded

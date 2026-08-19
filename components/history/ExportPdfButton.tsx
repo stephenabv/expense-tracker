@@ -11,6 +11,8 @@ export interface ExportPdfButtonProps {
   days: HistoryDay[];
   summary: HistorySummary;
   periodLabel: string;
+  /** Named in the report when the history is narrowed to one allotment. */
+  budgetLabel?: string | null;
 }
 
 function DownloadIcon() {
@@ -59,6 +61,7 @@ export function ExportPdfButton({
   days,
   summary,
   periodLabel,
+  budgetLabel = null,
 }: ExportPdfButtonProps) {
   const { showToast } = useToast();
   const [busy, setBusy] = useState(false);
@@ -74,7 +77,7 @@ export function ExportPdfButton({
         "@/lib/pdf/report"
       );
 
-      const doc = buildHistoryReport({ days, summary, periodLabel });
+      const doc = buildHistoryReport({ days, summary, periodLabel, budgetLabel });
       doc.save(historyReportFilename(summary));
 
       showToast("PDF report downloaded", "positive");

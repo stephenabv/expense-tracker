@@ -27,8 +27,9 @@ interface BudgetRow {
   id: string;
   name: string;
   amount_centavos: string | number;
-  start_date: string;
-  end_date: string;
+  /** NULL for a general allotment with no date restriction. */
+  start_date: string | null;
+  end_date: string | null;
   locked: boolean;
   created_at: Date | string;
   updated_at: Date | string;
@@ -52,8 +53,10 @@ function toBudget(row: BudgetRow): Budget {
     id: row.id,
     name: row.name,
     amount: fromCentavos(row.amount_centavos),
-    startDate: row.start_date,
-    endDate: row.end_date,
+    // A half-set period cannot be stored (see migration 003), so a NULL on
+    // either side means the allotment carries no date restriction at all.
+    startDate: row.start_date ?? null,
+    endDate: row.end_date ?? null,
     locked: row.locked,
     createdAt: iso(row.created_at),
     updatedAt: iso(row.updated_at),
@@ -86,7 +89,7 @@ export async function listBudgets(
   const { rows } = await db.query<BudgetRow>(
     `SELECT ${BUDGET_COLUMNS} FROM budgets
       WHERE user_id = $1
-      ORDER BY start_date DESC, end_date DESC, id`,
+      ORDER BY start_date DESC NULLS LAST, end_date DESC NULLS LAST, id`,
     [userId],
   );
   return rows.map(toBudget);

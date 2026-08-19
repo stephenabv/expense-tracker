@@ -9,7 +9,14 @@ import { HistoryDayCard } from "@/components/history/HistoryDayCard";
 import { HistoryFilterBar } from "@/components/history/HistoryFilterBar";
 import { HistorySummaryCard } from "@/components/history/HistorySummaryCard";
 import { ExportPdfButton } from "@/components/history/ExportPdfButton";
-import { buildHistory, describeFilter, filterHistory, summarizeHistory } from "@/lib/history";
+import {
+  buildHistory,
+  describeBudgetFilter,
+  describeFilter,
+  filterHistory,
+  summarizeHistory,
+} from "@/lib/history";
+import { sortBudgetsByPeriod } from "@/lib/budgets";
 
 function HistorySkeleton() {
   return (
@@ -71,9 +78,17 @@ export function HistoryView() {
     [budgets, expenses],
   );
 
+  // Exactly what the screen shows is what the PDF prints: one filtered list,
+  // used for the summary, the breakdown and the export alike.
   const days = useMemo(() => filterHistory(history, filter), [history, filter]);
   const summary = useMemo(() => summarizeHistory(days), [days]);
   const periodLabel = useMemo(() => describeFilter(filter), [filter]);
+
+  const selectableBudgets = useMemo(() => sortBudgetsByPeriod(budgets), [budgets]);
+  const budgetLabel = useMemo(
+    () => describeBudgetFilter(budgets, filter),
+    [budgets, filter],
+  );
 
   // For "all time" the label is generic, so name the span that was actually found.
   const resolvedLabel =
@@ -96,13 +111,21 @@ export function HistoryView() {
   return (
     <AppShell>
       <div className="space-y-4 pb-16 sm:space-y-5">
-        <HistoryFilterBar filter={filter} onApply={setFilter} />
+        <HistoryFilterBar
+          filter={filter}
+          onApply={setFilter}
+          budgets={selectableBudgets}
+        />
 
         {days.length === 0 ? (
           <EmptyHistory label={periodLabel} />
         ) : (
           <>
-            <HistorySummaryCard summary={summary} periodLabel={resolvedLabel} />
+            <HistorySummaryCard
+              summary={summary}
+              periodLabel={resolvedLabel}
+              budgetLabel={budgetLabel}
+            />
 
             <div className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
               <h2 className="text-[0.9375rem] font-semibold tracking-tight text-foreground">
@@ -112,6 +135,7 @@ export function HistoryView() {
                 days={days}
                 summary={summary}
                 periodLabel={resolvedLabel}
+                budgetLabel={budgetLabel}
               />
             </div>
 

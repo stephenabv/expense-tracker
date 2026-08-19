@@ -2,9 +2,12 @@
 
 import { useEffect, useState } from "react";
 
+import type { Budget } from "@/types/budget";
 import type { HistoryFilter, HistoryPreset } from "@/types/history";
 import { Button } from "@/components/ui/Button";
 import { DateField } from "@/components/ui/DateField";
+import { SelectField } from "@/components/ui/SelectField";
+import { describeBudgetPeriod } from "@/lib/budgets";
 import { presetToFilter, validateFilter } from "@/lib/history";
 import { todayKey } from "@/lib/dates";
 import { cn } from "@/lib/utils";
@@ -23,6 +26,8 @@ type Mode = "single" | "range";
 export interface HistoryFilterBarProps {
   filter: HistoryFilter;
   onApply: (filter: HistoryFilter) => void;
+  /** Allotments the user can narrow the history to. */
+  budgets: Budget[];
 }
 
 /**
@@ -31,7 +36,11 @@ export interface HistoryFilterBarProps {
  * Presets apply immediately because that is the whole point of a shortcut;
  * hand-picked dates wait for Apply so a half-typed range never runs.
  */
-export function HistoryFilterBar({ filter, onApply }: HistoryFilterBarProps) {
+export function HistoryFilterBar({
+  filter,
+  onApply,
+  budgets,
+}: HistoryFilterBarProps) {
   const today = todayKey();
 
   const [mode, setMode] = useState<Mode>(
@@ -59,10 +68,14 @@ export function HistoryFilterBar({ filter, onApply }: HistoryFilterBarProps) {
     setError(null);
   }, [filter]);
 
+  // The budget selection is independent of the dates, so it survives every
+  // preset and every Apply rather than being reset by them.
+  const budgetId = filter.budgetId ?? null;
+
   const draft = (): HistoryFilter =>
     mode === "single"
-      ? { mode: "single", date: single }
-      : { mode: "range", start, end };
+      ? { mode: "single", date: single, budgetId }
+      : { mode: "range", start, end, budgetId };
 
   const handleApply = () => {
     const next = draft();
@@ -77,7 +90,7 @@ export function HistoryFilterBar({ filter, onApply }: HistoryFilterBarProps) {
 
   const applyPreset = (preset: HistoryPreset) => {
     setError(null);
-    onApply(presetToFilter(preset));
+    onApply({ ...presetToFilter(preset), budgetId });
   };
 
   const isPresetActive = (preset: HistoryPreset) => {
@@ -160,6 +173,28 @@ export function HistoryFilterBar({ filter, onApply }: HistoryFilterBarProps) {
         ))}
       </div>
 
+      {/* Narrowing to one allotment applies immediately: it does not depend on
+          a half-typed date, and the export must match whatever is on screen. */}
+      {budgets.length > 1 ? (
+        <div className="mt-4">
+          <SelectField
+            label="Budget Allotment"
+            value={budgetId ?? ""}
+            hint="The summary, the breakdown and the PDF all follow this."
+            onChange={(event) =>
+              onApply({ ...filter, budgetId: event.target.value || null })
+            }
+          >
+            <option value="">All budget allotments</option>
+            {budgets.map((budget) => (
+              <option key={budget.id} value={budget.id}>
+                {budget.name} · {describeBudgetPeriod(budget)}
+              </option>
+            ))}
+          </SelectField>
+        </div>
+      ) : null}
+
       <div className="mt-4 flex flex-col gap-3 sm:flex-row sm:items-end">
         {mode === "single" ? (
           <DateField
@@ -203,7 +238,10 @@ export function HistoryFilterBar({ filter, onApply }: HistoryFilterBarProps) {
           </Button>
           <Button
             variant="secondary"
-            onClick={() => applyPreset("all")}
+            onClick={() => {
+              setError(null);
+              onApply({ ...presetToFilter("all"), budgetId: null });
+            }}
             className="flex-1 sm:flex-none"
           >
             Clear

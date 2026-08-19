@@ -27,8 +27,8 @@ import type { Budget, BudgetInput, BudgetSummary } from "@/types/budget";
 import type { Expense, ExpenseInput } from "@/types/expense";
 import { calculateAvailableBalance, sortExpensesByNewest } from "@/lib/calculations";
 import {
-  activeBudget,
   budgetsForDate,
+  budgetsForToday,
   expensesForBudget,
   isCompleted,
   sortBudgetsByPeriod,
@@ -54,7 +54,13 @@ interface TrackerContextValue {
   budgets: Budget[];
   budgetSummaries: BudgetSummary[];
   expenses: Expense[];
-  currentBudget: Budget | null;
+  /**
+   * Budgets that could fund an expense dated today: those whose period covers
+   * it, plus every general allotment. Several may apply at once — there is
+   * deliberately no single "current budget", because picking one for the user
+   * is the guess this app does not make.
+   */
+  todaysBudgets: Budget[];
 
   createBudget: (input: BudgetInput) => Promise<void>;
   updateBudget: (id: string, input: BudgetInput) => Promise<void>;
@@ -198,7 +204,7 @@ export function TrackerProvider({
     [sortedBudgets, expenses],
   );
 
-  const currentBudget = useMemo(() => activeBudget(sortedBudgets), [sortedBudgets]);
+  const todaysBudgets = useMemo(() => budgetsForToday(sortedBudgets), [sortedBudgets]);
 
   const getBudget = useCallback(
     (id: string) => budgets.find((budget) => budget.id === id) ?? null,
@@ -215,6 +221,7 @@ export function TrackerProvider({
     [expenses],
   );
 
+  /** Budgets eligible to fund an expense on `date`, best match first. */
   const budgetsCovering = useCallback(
     (date: DateKey) => budgetsForDate(budgets, date),
     [budgets],
@@ -242,7 +249,7 @@ export function TrackerProvider({
       budgets: sortedBudgets,
       budgetSummaries,
       expenses: sortedExpenses,
-      currentBudget,
+      todaysBudgets,
       createBudget,
       updateBudget,
       setBudgetLocked,
@@ -262,7 +269,7 @@ export function TrackerProvider({
       sortedBudgets,
       budgetSummaries,
       sortedExpenses,
-      currentBudget,
+      todaysBudgets,
       createBudget,
       updateBudget,
       setBudgetLocked,
