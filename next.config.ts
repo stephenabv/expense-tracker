@@ -9,11 +9,14 @@ const nextConfig: NextConfig = {
    * `@node-rs/argon2` and `pg` ship native bindings, and `@electric-sql/pglite`
    * ships a WASM payload — the bundler cannot trace those companion files, so
    * bundling them produces a server that starts and then fails on first use.
+   * `nodemailer` resolves several of its own modules dynamically for the same
+   * reason.
    */
   serverExternalPackages: [
     "@node-rs/argon2",
     "pg",
     "@electric-sql/pglite",
+    "nodemailer",
   ],
 
   async headers() {

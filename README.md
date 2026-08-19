@@ -156,8 +156,11 @@ Copy `.env.example` to `.env.local`. Nothing secret is committed — `.env` and
 | `DATABASE_URL` | yes | PostgreSQL connection string. `pglite://<path>` runs the embedded development database instead. |
 | `AUTH_SECRET` | yes | Signs and encrypts the session cookie. Generate with `npx auth secret`. |
 | `APP_URL` | no | Base URL for the links inside emails. Detected automatically on Vercel. |
-| `RESEND_API_KEY` | no | Sends real email. Without it, links are logged to the server console. |
-| `EMAIL_FROM` | no | Sender address, required alongside `RESEND_API_KEY`. |
+| `SMTP_HOST` | no | SMTP relay host, e.g. `smtp-relay.brevo.com`. |
+| `SMTP_PORT` | no | Relay port (default 587). 465 uses implicit TLS; anything else requires STARTTLS. |
+| `SMTP_USER` | no | SMTP login. |
+| `SMTP_PASSWORD` | no | SMTP key or password. A credential — set it in `.env.local` and in the host's environment, never in the repository. |
+| `EMAIL_FROM` | no | Sender address, which the relay must have verified. |
 | `DATABASE_POOL_MAX` | no | Connections per instance (default 5). |
 | `DATABASE_POOL_IDLE_MS` | no | Idle connection lifetime (default 10000; `0` keeps them open). |
 
@@ -414,7 +417,7 @@ The app needs a PostgreSQL database and an auth secret before accounts work.
 1. Provision Postgres — Neon, Supabase, Vercel Postgres or anything else that
    speaks the protocol.
 2. In Vercel → Settings → Environment Variables, set `DATABASE_URL` and
-   `AUTH_SECRET` (`npx auth secret` generates one). Add `RESEND_API_KEY` and
+   `AUTH_SECRET` (`npx auth secret` generates one). Add the `SMTP_*` variables and
    `EMAIL_FROM` to send real email; without them, verification and reset links
    are only written to the server log.
 3. Apply the schema once: `DATABASE_URL=... npm run db:migrate`.
