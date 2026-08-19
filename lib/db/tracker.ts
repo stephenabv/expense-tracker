@@ -10,6 +10,7 @@
 import { randomUUID } from "node:crypto";
 
 import { getDatabase, type SqlExecutor } from "@/lib/db/client";
+import { clampPageSize, offsetFor, paginationFor, type Page } from "@/lib/pagination";
 import type { Budget, BudgetInput } from "@/types/budget";
 import type { Expense, ExpenseInput } from "@/types/expense";
 import { roundCurrency } from "@/lib/currency";
@@ -251,6 +252,197 @@ export async function deleteExpenseRow(
     [userId, expenseId],
   );
   return rows.length > 0;
+}
+
+
+/* ------------------------------------------------- aggregates and paging -- */
+
+/** One budget's spend, computed by the database rather than in the browser. */
+export interface BudgetTotal {
+  budgetId: string;
+  totalExpenses: number;
+  expenseCount: number;
+}
+
+/**
+ * Per-budget totals for one user.
+ *
+ * This is what lets the expense list be paginated. A balance is
+ * `amount − SUM(expenses)`, and summing in SQL means the client never has to
+ * hold every row to know what a budget has left — one small result set instead
+ * of an unbounded one.
+ */
+export async function budgetTotals(
+  userId: string,
+  db: SqlExecutor = getDatabase(),
+): Promise<BudgetTotal[]> {
+  const { rows } = await db.query<{
+    budget_id: string;
+    total_centavos: string | number;
+    expense_count: string | number;
+  }>(
+    `SELECT budget_id,
+            COALESCE(SUM(amount_centavos), 0) AS total_centavos,
+            COUNT(*) AS expense_count
+       FROM expenses
+      WHERE user_id = $1
+      GROUP BY budget_id`,
+    [userId],
+  );
+
+  return rows.map((row) => ({
+    budgetId: row.budget_id,
+    totalExpenses: fromCentavos(row.total_centavos),
+    expenseCount: Number(row.expense_count),
+  }));
+}
+
+/**
+ * Per-budget spend strictly before a date.
+ *
+ * History chains each budget's balance forward through its own days. When the
+ * view only fetches a window, the days before it still have to be accounted
+ * for — otherwise a report on August would open every budget at its full
+ * allotment as though July had never happened. One grouped sum answers that
+ * without shipping the earlier rows.
+ */
+export async function budgetTotalsBefore(
+  userId: string,
+  beforeDate: string,
+  db: SqlExecutor = getDatabase(),
+): Promise<BudgetTotal[]> {
+  const { rows } = await db.query<{
+    budget_id: string;
+    total_centavos: string | number;
+    expense_count: string | number;
+  }>(
+    `SELECT budget_id,
+            COALESCE(SUM(amount_centavos), 0) AS total_centavos,
+            COUNT(*) AS expense_count
+       FROM expenses
+      WHERE user_id = $1 AND expense_date < $2
+      GROUP BY budget_id`,
+    [userId, beforeDate],
+  );
+
+  return rows.map((row) => ({
+    budgetId: row.budget_id,
+    totalExpenses: fromCentavos(row.total_centavos),
+    expenseCount: Number(row.expense_count),
+  }));
+}
+
+/** How a list of expenses is ordered. Applied in SQL, across the whole set. */
+export type ExpenseSort = "newest" | "oldest" | "highest" | "lowest";
+
+const SORT_CLAUSES: Record<ExpenseSort, string> = {
+  // Ties break on created_at then id so paging is stable: without a total
+  // order, a row can appear on two pages or on none.
+  newest: "expense_date DESC, created_at DESC, id DESC",
+  oldest: "expense_date ASC, created_at ASC, id ASC",
+  highest: "amount_centavos DESC, expense_date DESC, id DESC",
+  lowest: "amount_centavos ASC, expense_date ASC, id ASC",
+};
+
+export interface ExpenseQuery {
+  page?: number;
+  pageSize?: number;
+  sort?: ExpenseSort;
+  /** Restrict to one allotment. */
+  budgetId?: string | null;
+  /** Inclusive date bounds, as `YYYY-MM-DD`. */
+  from?: string | null;
+  to?: string | null;
+}
+
+/**
+ * One page of a user's expenses.
+ *
+ * Sorting and filtering both happen in the query, so "highest amount" means the
+ * highest of *all* the user's expenses rather than the highest of whichever
+ * page happens to be loaded. The sort key is looked up from a fixed table —
+ * never interpolated from the request — and every other value is a bound
+ * parameter.
+ */
+export async function listExpensesPage(
+  userId: string,
+  query: ExpenseQuery = {},
+  db: SqlExecutor = getDatabase(),
+): Promise<Page<Expense>> {
+  const pageSize = clampPageSize(query.pageSize);
+  const order = SORT_CLAUSES[query.sort ?? "newest"] ?? SORT_CLAUSES.newest;
+
+  const conditions = ["user_id = $1"];
+  const params: unknown[] = [userId];
+
+  if (query.budgetId) {
+    params.push(query.budgetId);
+    conditions.push(`budget_id = $${params.length}`);
+  }
+  if (query.from) {
+    params.push(query.from);
+    conditions.push(`expense_date >= $${params.length}`);
+  }
+  if (query.to) {
+    params.push(query.to);
+    conditions.push(`expense_date <= $${params.length}`);
+  }
+
+  const where = conditions.join(" AND ");
+
+  const { rows: counted } = await db.query<{ total: string | number }>(
+    `SELECT COUNT(*) AS total FROM expenses WHERE ${where}`,
+    params,
+  );
+  const totalItems = Number(counted[0]?.total ?? 0);
+
+  // Resolve the page against the real total first: a filter that shrinks the
+  // result set must not leave the caller on an empty page.
+  const pagination = paginationFor(totalItems, query.page ?? 1, pageSize);
+
+  if (totalItems === 0) return { data: [], pagination };
+
+  const { rows } = await db.query<ExpenseRow>(
+    `SELECT ${EXPENSE_COLUMNS} FROM expenses
+      WHERE ${where}
+      ORDER BY ${order}
+      LIMIT $${params.length + 1} OFFSET $${params.length + 2}`,
+    [...params, pagination.pageSize, offsetFor(pagination.page, pagination.pageSize)],
+  );
+
+  return { data: rows.map(toExpense), pagination };
+}
+
+/** Every expense matching a filter, for an export that must not be truncated. */
+export async function listExpensesMatching(
+  userId: string,
+  query: Omit<ExpenseQuery, "page" | "pageSize"> = {},
+  db: SqlExecutor = getDatabase(),
+): Promise<Expense[]> {
+  const conditions = ["user_id = $1"];
+  const params: unknown[] = [userId];
+
+  if (query.budgetId) {
+    params.push(query.budgetId);
+    conditions.push(`budget_id = $${params.length}`);
+  }
+  if (query.from) {
+    params.push(query.from);
+    conditions.push(`expense_date >= $${params.length}`);
+  }
+  if (query.to) {
+    params.push(query.to);
+    conditions.push(`expense_date <= $${params.length}`);
+  }
+
+  const { rows } = await db.query<ExpenseRow>(
+    `SELECT ${EXPENSE_COLUMNS} FROM expenses
+      WHERE ${conditions.join(" AND ")}
+      ORDER BY expense_date DESC, created_at DESC, id`,
+    params,
+  );
+
+  return rows.map(toExpense);
 }
 
 /** Everything the tracker needs for one user, in one round trip each. */

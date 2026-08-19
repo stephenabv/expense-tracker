@@ -1,10 +1,18 @@
 "use client";
 
-import { useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 
+import type { Expense } from "@/types/expense";
 import type { HistoryFilter } from "@/types/history";
 import { useTracker } from "@/components/providers/TrackerProvider";
 import { AppShell } from "@/components/layout/AppShell";
+import { Button } from "@/components/ui/Button";
+import { Pagination } from "@/components/ui/Pagination";
+import {
+  HistoryDaySkeleton,
+  SkeletonRegion,
+  SummaryCardSkeleton,
+} from "@/components/ui/Skeleton";
 import { HistoryDayCard } from "@/components/history/HistoryDayCard";
 import { HistoryFilterBar } from "@/components/history/HistoryFilterBar";
 import { HistorySummaryCard } from "@/components/history/HistorySummaryCard";
@@ -17,18 +25,25 @@ import {
   summarizeHistory,
 } from "@/lib/history";
 import { sortBudgetsByPeriod } from "@/lib/budgets";
+import { DEFAULT_PAGE_SIZE, paginationFor } from "@/lib/pagination";
+import { loadHistoryAction } from "@/lib/server/tracker-actions";
 
-function HistorySkeleton() {
-  return (
-    <div role="status" aria-live="polite" className="space-y-4 pb-16 sm:space-y-5">
-      <span className="sr-only">Loading your history…</span>
-      <div className="h-44 animate-pulse rounded-2xl border border-border-subtle bg-surface" />
-      <div className="h-56 animate-pulse rounded-2xl border border-border-subtle bg-surface" />
-    </div>
-  );
+/** The dates a filter covers, as the query understands them. */
+function filterBounds(filter: HistoryFilter): { from: string | null; to: string | null } {
+  if (filter.mode === "single") return { from: filter.date, to: filter.date };
+  if (filter.mode === "range") return { from: filter.start, to: filter.end };
+  return { from: null, to: null };
 }
 
-function EmptyHistory({ label }: { label: string }) {
+function EmptyHistory({
+  label,
+  filtered,
+  onClear,
+}: {
+  label: string;
+  filtered: boolean;
+  onClear: () => void;
+}) {
   return (
     <div className="flex flex-col items-center rounded-2xl border border-border-subtle bg-surface px-6 py-14 text-center shadow-card">
       <div
@@ -50,12 +65,19 @@ function EmptyHistory({ label }: { label: string }) {
       </div>
 
       <h3 className="mt-4 text-base font-semibold text-foreground">
-        No tracker activity found
+        {filtered ? "No activity matches your filters" : "No tracker activity yet"}
       </h3>
       <p className="mt-1 max-w-xs text-sm text-muted">
-        Nothing was recorded for {label}. Try a wider range, or record an
-        expense on the Tracker.
+        {filtered
+          ? `Nothing was recorded for ${label}. Try a wider range or a different allotment.`
+          : "Record an expense on the Tracker and it will appear here."}
       </p>
+
+      {filtered ? (
+        <Button variant="secondary" className="mt-5" onClick={onClear}>
+          Clear filters
+        </Button>
+      ) : null}
     </div>
   );
 }
@@ -63,23 +85,57 @@ function EmptyHistory({ label }: { label: string }) {
 /**
  * The history screen.
  *
- * Each day is reported against the budget that paid for it, with balances
- * chained inside that budget only — so two allotments running back to back read
- * as two separate financial periods rather than one continuous account.
+ * The server returns the expenses the filter selected — never the whole
+ * account — plus what each budget had spent before the window, which is what
+ * keeps a running balance true when only part of the timeline is loaded. Days
+ * are then derived by the same pure functions the tests cover, and the day
+ * cards are paged so a year of history is not a year of DOM.
  */
 export function HistoryView() {
-  const { hydrated, budgets, expenses } = useTracker();
+  const { budgets } = useTracker();
   const [filter, setFilter] = useState<HistoryFilter>({ mode: "all" });
+  const [expenses, setExpenses] = useState<Expense[]>([]);
+  const [spentBefore, setSpentBefore] = useState<Map<string, number>>(new Map());
+  const [loading, setLoading] = useState(true);
+  const [page, setPage] = useState(1);
+  const [pageSize, setPageSize] = useState<number>(DEFAULT_PAGE_SIZE);
 
-  // Derived from source data, so a back-dated expense or a corrected budget
-  // shows up here immediately rather than behind a stale snapshot.
+  // Only the newest request may write to state; two quick filter changes can
+  // otherwise settle on the older answer.
+  const requestRef = useRef(0);
+
+  const { from, to } = filterBounds(filter);
+  const budgetId = filter.budgetId ?? null;
+
+  const load = useCallback(async () => {
+    const request = (requestRef.current += 1);
+    setLoading(true);
+
+    try {
+      const result = await loadHistoryAction({ from, to, budgetId });
+      if (request !== requestRef.current) return;
+
+      if (result.ok) {
+        setExpenses(result.data.expenses);
+        setSpentBefore(new Map(result.data.spentBefore));
+      }
+    } finally {
+      if (request === requestRef.current) setLoading(false);
+    }
+  }, [from, to, budgetId]);
+
+  useEffect(() => {
+    void load();
+    // A changed filter always returns to the first page: page 7 of the old
+    // result set may not exist in the new one.
+    setPage(1);
+  }, [load]);
+
   const history = useMemo(
-    () => buildHistory(budgets, expenses),
-    [budgets, expenses],
+    () => buildHistory(budgets, expenses, spentBefore),
+    [budgets, expenses, spentBefore],
   );
 
-  // Exactly what the screen shows is what the PDF prints: one filtered list,
-  // used for the summary, the breakdown and the export alike.
   const days = useMemo(() => filterHistory(history, filter), [history, filter]);
   const summary = useMemo(() => summarizeHistory(days), [days]);
   const periodLabel = useMemo(() => describeFilter(filter), [filter]);
@@ -90,7 +146,17 @@ export function HistoryView() {
     [budgets, filter],
   );
 
-  // For "all time" the label is generic, so name the span that was actually found.
+  const pagination = paginationFor(days.length, page, pageSize);
+  const visible = useMemo(
+    () =>
+      days.slice(
+        (pagination.page - 1) * pagination.pageSize,
+        pagination.page * pagination.pageSize,
+      ),
+    [days, pagination.page, pagination.pageSize],
+  );
+
+  // For "all time" the label is generic, so name the span that was found.
   const resolvedLabel =
     filter.mode === "all" && summary.firstDate && summary.lastDate
       ? describeFilter({
@@ -100,13 +166,7 @@ export function HistoryView() {
         })
       : periodLabel;
 
-  if (!hydrated) {
-    return (
-      <AppShell>
-        <HistorySkeleton />
-      </AppShell>
-    );
-  }
+  const isFiltered = filter.mode !== "all" || budgetId !== null;
 
   return (
     <AppShell>
@@ -117,8 +177,21 @@ export function HistoryView() {
           budgets={selectableBudgets}
         />
 
-        {days.length === 0 ? (
-          <EmptyHistory label={periodLabel} />
+        {loading ? (
+          <SkeletonRegion label="Loading your history…" className="space-y-4 sm:space-y-5">
+            <SummaryCardSkeleton />
+            <div className="space-y-3">
+              {[0, 1, 2].map((index) => (
+                <HistoryDaySkeleton key={index} />
+              ))}
+            </div>
+          </SkeletonRegion>
+        ) : days.length === 0 ? (
+          <EmptyHistory
+            label={periodLabel}
+            filtered={isFiltered}
+            onClear={() => setFilter({ mode: "all", budgetId: null })}
+          />
         ) : (
           <>
             <HistorySummaryCard
@@ -131,6 +204,7 @@ export function HistoryView() {
               <h2 className="text-[0.9375rem] font-semibold tracking-tight text-foreground">
                 Daily breakdown
               </h2>
+              {/* The export takes every selected day, not the visible page. */}
               <ExportPdfButton
                 days={days}
                 summary={summary}
@@ -140,14 +214,30 @@ export function HistoryView() {
             </div>
 
             <div className="space-y-3">
-              {days.map((day, index) => (
-                <HistoryDayCard
+              {visible.map((day, index) => (
+                <div
                   key={`${day.date}-${day.budgetId}`}
-                  day={day}
-                  defaultOpen={index === 0}
-                />
+                  className="animate-rise-in"
+                  style={{
+                    // A short, capped stagger: enough to read as a list
+                    // settling into place, never enough to wait for.
+                    animationDelay: `${Math.min(index, 6) * 25}ms`,
+                  }}
+                >
+                  <HistoryDayCard day={day} defaultOpen={index === 0} />
+                </div>
               ))}
             </div>
+
+            <Pagination
+              pagination={pagination}
+              noun="days"
+              onPageChange={setPage}
+              onPageSizeChange={(size) => {
+                setPageSize(size);
+                setPage(1);
+              }}
+            />
           </>
         )}
       </div>

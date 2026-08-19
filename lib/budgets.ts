@@ -184,6 +184,70 @@ export function summarizeBudgets(
   return budgets.map((budget) => summarizeBudget(budget, expenses, now));
 }
 
+/** One budget's spend, as counted by the database. */
+export interface BudgetTotals {
+  budgetId: string;
+  totalExpenses: number;
+  expenseCount: number;
+}
+
+/**
+ * The same summary, built from an aggregate instead of the rows.
+ *
+ * This is what lets the expense list be paginated. `summarizeBudget` needs
+ * every expense in memory to add them up; here the sum arrives already computed
+ * from SQL, so a balance costs one small row per budget however many thousands
+ * of expenses sit behind it. The arithmetic is identical — only the source of
+ * the total differs.
+ */
+export function summarizeBudgetFromTotals(
+  budget: Budget,
+  totals: BudgetTotals | undefined,
+  now: Date = new Date(),
+): BudgetSummary {
+  const totalExpenses = roundCurrency(totals?.totalExpenses ?? 0);
+  const remaining = roundCurrency(budget.amount - totalExpenses);
+
+  return {
+    budget,
+    totalExpenses,
+    remaining,
+    expenseCount: totals?.expenseCount ?? 0,
+    // Status needs to know only whether this budget is overspent, which the
+    // total already answers — so no expense rows are required here either.
+    status:
+      remaining < 0
+        ? "over-budget"
+        : isGeneralBudget(budget)
+          ? "unrestricted"
+          : todayKey(now) < budget.startDate!
+            ? "upcoming"
+            : todayKey(now) > budget.endDate!
+              ? "completed"
+              : "active",
+    applicability: budgetApplicability(budget),
+    spentRatio:
+      budget.amount > 0
+        ? Math.min(Math.max(totalExpenses / budget.amount, 0), 1)
+        : 0,
+    isOverspent: remaining < 0,
+    durationDays: isGeneralBudget(budget)
+      ? null
+      : daysBetween(budget.startDate!, budget.endDate!),
+  };
+}
+
+export function summarizeBudgetsFromTotals(
+  budgets: Budget[],
+  totals: BudgetTotals[],
+  now: Date = new Date(),
+): BudgetSummary[] {
+  const byId = new Map(totals.map((entry) => [entry.budgetId, entry]));
+  return budgets.map((budget) =>
+    summarizeBudgetFromTotals(budget, byId.get(budget.id), now),
+  );
+}
+
 /**
  * Listing order: dated allotments newest period first, then the general ones.
  *

@@ -72,6 +72,19 @@ expense records on each render, so the screen cannot drift from the data.
   by date and then by budget. It contains exactly what the filter selected.
 - **Persistence** — budgets and expenses live in PostgreSQL, scoped to the
   signed-in account, and every mutation is re-validated on the server.
+- **Paginated by the database** — the expense list is fetched one page at a
+  time, with sorting and filtering applied in SQL, so "highest amount" means the
+  highest of everything recorded rather than of whatever page is loaded. Budget
+  balances come from grouped aggregates, so they cost one small row per budget
+  however many thousands of expenses sit behind them.
+- **Loading that says something** — route-level skeletons shaped like the real
+  content, action buttons that report progress ("Adding Expense…"), and empty
+  states that distinguish "nothing recorded" from "nothing matches this filter".
+- **Native-feeling motion** — short transform/opacity transitions on screens,
+  modals, sheets, list items and toasts, all collapsed by
+  `prefers-reduced-motion`.
+- **Versioned** — the footer shows the app name, the current year, the version
+  from `lib/app-config.ts` and a seven-character build id.
 - **Peso formatting** — `Intl.NumberFormat` throughout; money is summed in whole
   centavos so repeated addition never drifts.
 - **Responsive and accessible** — mobile-first, with bottom-sheet dialogs on
@@ -360,6 +373,29 @@ Budgets". A combined **balance** is not offered anywhere — not on the dashboar
 not in the summary card, not in the PDF. ₱3,200 of food money plus ₱8,000 of
 emergency money is not ₱11,200 of anything the user can spend, so remaining
 balances are only ever reported per allotment.
+
+## Pagination
+
+`lib/pagination.ts` holds the arithmetic — page windows, ranges, clamping — and
+both halves of the app read it, so the label under a list can never disagree
+with the rows above it.
+
+Two rules are worth knowing:
+
+- **A page size arriving from the client is clamped, never trusted.**
+  `?pageSize=1000000` is a request to read the whole table; `MAX_PAGE_SIZE`
+  turns it into 100.
+- **A page beyond the end is pulled back rather than returned empty.** Narrowing
+  a filter must not strand the reader on page 7 of a result set that now has
+  one page, so `paginationFor` resolves the page against the real total and any
+  change other than the page itself returns to page 1.
+
+History is the one list not paged in SQL. Its rows are *derived* — days with
+running balances chained inside each budget — so it fetches the expenses the
+filter selected (the filter is the bound, and the server also returns what each
+budget spent before the window so the opening balance stays true) and pages the
+derived day cards in the browser. The expense list, which is the one that grows
+without limit, is paged entirely in the database.
 
 ## Stored data
 

@@ -1,8 +1,11 @@
 "use client";
 
-import { useMemo } from "react";
+import { useEffect, useState } from "react";
 
 import type { Budget } from "@/types/budget";
+import type { Expense } from "@/types/expense";
+import { listExpensesAction } from "@/lib/server/tracker-actions";
+import { ExpenseRowSkeleton } from "@/components/ui/Skeleton";
 import { useTracker } from "@/components/providers/TrackerProvider";
 import { Modal } from "@/components/ui/Modal";
 import { Button } from "@/components/ui/Button";
@@ -20,13 +23,37 @@ export interface BudgetDetailModalProps {
 
 /** Read-only view of one allotment and the expenses charged to it. */
 export function BudgetDetailModal({ open, onClose, budget }: BudgetDetailModalProps) {
-  const { getBudgetSummary, expensesFor } = useTracker();
+  const { getBudgetSummary } = useTracker();
 
   const summary = budget ? getBudgetSummary(budget.id) : null;
-  const expenses = useMemo(
-    () => (budget ? expensesFor(budget.id) : []),
-    [budget, expensesFor],
-  );
+
+  /*
+   * This budget's most recent expenses, fetched when the modal opens.
+   *
+   * The provider holds a page of *all* expenses, which is not the same as this
+   * allotment's — so the modal asks for exactly what it shows rather than
+   * filtering whatever happens to be loaded and quietly under-reporting.
+   */
+  const [expenses, setExpenses] = useState<Expense[]>([]);
+  const [loading, setLoading] = useState(false);
+
+  useEffect(() => {
+    if (!open || !budget) return;
+
+    let current = true;
+    setLoading(true);
+    setExpenses([]);
+
+    void listExpensesAction({ budgetId: budget.id, pageSize: 10 }).then((result) => {
+      if (!current) return;
+      if (result.ok) setExpenses(result.data.data);
+      setLoading(false);
+    });
+
+    return () => {
+      current = false;
+    };
+  }, [open, budget]);
 
   if (!budget || !summary) return null;
 
@@ -85,13 +112,19 @@ export function BudgetDetailModal({ open, onClose, budget }: BudgetDetailModalPr
             Expenses in this budget
           </h3>
 
-          {expenses.length === 0 ? (
+          {loading ? (
+            <ul className="mt-2 divide-y divide-border-subtle rounded-xl border border-border-subtle">
+              {[0, 1, 2].map((index) => (
+                <ExpenseRowSkeleton key={index} />
+              ))}
+            </ul>
+          ) : expenses.length === 0 ? (
             <p className="mt-2 text-sm text-muted">
               Nothing recorded against this allotment yet.
             </p>
           ) : (
             <ul className="mt-2 divide-y divide-border-subtle rounded-xl border border-border-subtle">
-              {expenses.map((expense) => (
+              {expenses.map((expense: Expense) => (
                 <li
                   key={expense.id}
                   className="flex items-center gap-3 px-3.5 py-2.5"
@@ -111,6 +144,13 @@ export function BudgetDetailModal({ open, onClose, budget }: BudgetDetailModalPr
               ))}
             </ul>
           )}
+
+          {!loading && summary.expenseCount > expenses.length ? (
+            <p className="mt-2 text-[0.8125rem] text-muted">
+              Showing the {expenses.length} most recent of {summary.expenseCount}.
+              See the Tracker for the full list.
+            </p>
+          ) : null}
         </div>
       </div>
     </Modal>

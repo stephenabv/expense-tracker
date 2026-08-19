@@ -30,7 +30,7 @@ function BudgetsSkeleton() {
 
 /** Create, review and manage every budget allotment. */
 export function BudgetsView() {
-  const { hydrated, budgetSummaries, deleteBudget, isBudgetCompleted, expensesFor } =
+  const { hydrated, budgetSummaries, deleteBudget, isBudgetCompleted, getBudgetSummary } =
     useTracker();
   const { showToast } = useToast();
 
@@ -186,8 +186,11 @@ export function BudgetsView() {
         {pendingDelete ? (
           <p className="text-sm text-muted">
             <span className="font-medium text-foreground">{pendingDelete.name}</span>{" "}
-            has {expensesFor(pendingDelete.id).length} recorded expense
-            {expensesFor(pendingDelete.id).length === 1 ? "" : "s"}.
+            has {getBudgetSummary(pendingDelete.id)?.expenseCount ?? 0} recorded
+            expense
+            {(getBudgetSummary(pendingDelete.id)?.expenseCount ?? 0) === 1
+              ? ""
+              : "s"}.
           </p>
         ) : null}
       </ConfirmDialog>

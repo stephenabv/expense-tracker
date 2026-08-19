@@ -1,6 +1,7 @@
 import Link from "next/link";
 import type { ReactNode } from "react";
 
+import { APP_NAME } from "@/lib/app-config";
 import { CURRENCY_SYMBOL } from "@/lib/currency";
 
 /** Centred frame shared by every authentication screen. */
@@ -20,7 +21,7 @@ export function AuthShell({
       <div className="rounded-2xl border border-border-subtle bg-surface p-6 shadow-card sm:p-8">
         <Link
           href="/"
-          aria-label="Expense Tracker"
+          aria-label={APP_NAME}
           className="inline-flex items-center gap-2.5 rounded-lg focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-ring"
         >
           <span
@@ -29,7 +30,7 @@ export function AuthShell({
           >
             {CURRENCY_SYMBOL}
           </span>
-          <span className="text-sm font-medium text-muted">Expense Tracker</span>
+          <span className="text-sm font-medium text-muted">{APP_NAME}</span>
         </Link>
 
         <h1 className="mt-5 text-2xl font-semibold tracking-tight text-foreground">

@@ -144,7 +144,18 @@ export function groupExpensesByDate(expenses: Expense[]): Map<DateKey, Expense[]
  * starts afresh from its own allotment. A day with no spending is not recorded —
  * inventing one would turn "no activity" into a misleading row of zeroes.
  */
-export function buildHistory(budgets: Budget[], expenses: Expense[]): HistoryDay[] {
+export function buildHistory(
+  budgets: Budget[],
+  expenses: Expense[],
+  /**
+   * Spend that happened before the supplied expenses, per budget id.
+   *
+   * Supplied when only a window of history was fetched: without it a budget
+   * would open the window at its full allotment, as though nothing had been
+   * spent from it earlier.
+   */
+  spentBefore?: Map<string, number>,
+): HistoryDay[] {
   const days: HistoryDay[] = [];
 
   for (const budget of budgets) {
@@ -154,7 +165,7 @@ export function buildHistory(budgets: Budget[], expenses: Expense[]): HistoryDay
     const groups = groupExpensesByDate(own);
     const dates = [...groups.keys()].sort();
 
-    let running = roundCurrency(budget.amount);
+    let running = roundCurrency(budget.amount - (spentBefore?.get(budget.id) ?? 0));
 
     for (const date of dates) {
       const dayExpenses = groups.get(date) ?? [];

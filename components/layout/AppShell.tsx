@@ -4,6 +4,7 @@ import Link from "next/link";
 import { usePathname } from "next/navigation";
 import type { ReactNode } from "react";
 
+import { APP_NAME } from "@/lib/app-config";
 import { cn } from "@/lib/utils";
 
 const NAV = [
@@ -26,7 +27,7 @@ export function AppShell({ children }: { children: ReactNode }) {
     <div className="mx-auto w-full max-w-3xl px-4 pt-6 sm:px-6 sm:pt-10">
       <header className="mb-5 flex flex-wrap items-center justify-between gap-3 sm:mb-6">
         <h1 className="text-xl font-semibold tracking-tight text-foreground sm:text-2xl">
-          Expense Tracker
+          {APP_NAME}
         </h1>
 
         {/* Scrolls sideways in its own strip on a narrow phone rather than
@@ -57,7 +58,17 @@ export function AppShell({ children }: { children: ReactNode }) {
         </nav>
       </header>
 
-      {children}
+      {/*
+        * Screen transition.
+        *
+        * Keying on the path restarts the animation on every navigation, so a
+        * section change reads as one screen replacing another rather than the
+        * content snapping over. Opacity and a few pixels of travel only — the
+        * page stays interactive throughout, and reduced-motion collapses it.
+        */}
+      <div key={pathname} className="animate-rise-in">
+        {children}
+      </div>
     </div>
   );
 }
