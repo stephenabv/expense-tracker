@@ -5,11 +5,10 @@
  * without touching the UI.
  */
 
-import type { Budget } from "@/types/budget";
+import type { Budget, BudgetApplicability } from "@/types/budget";
 import type { Expense } from "@/types/expense";
 import { MAX_AMOUNT, formatCurrency, parseAmount } from "@/lib/currency";
-import { formatDateRange, isValidDateKey, type DateKey } from "@/lib/dates";
-import { findOverlaps } from "@/lib/budgets";
+import { isValidDateKey, type DateKey } from "@/lib/dates";
 
 export const MAX_NAME_LENGTH = 60;
 export const MAX_BUDGET_NAME_LENGTH = 40;
@@ -68,19 +67,41 @@ export function validateBudgetAmount(input: string): ValidationResult<number> {
 export interface BudgetPeriodResult {
   ok: boolean;
   error?: string;
-  value?: { startDate: DateKey; endDate: DateKey };
+  value?: { startDate: DateKey | null; endDate: DateKey | null };
 }
 
 /**
- * Validates a budget period.
+ * Validates a budget period for the chosen applicability.
  *
- * A single-day budget is valid and is expressed as `startDate === endDate`.
+ * A single-day budget is expressed as `startDate === endDate`; a general
+ * allotment as two nulls. Whatever the date inputs happen to hold is ignored
+ * for a general budget — the user may have typed dates before switching the
+ * mode, and storing them would silently restrict the allotment.
  */
 export function validateBudgetPeriod(
+  applicability: BudgetApplicability,
   startDate: string,
   endDate: string,
 ): BudgetPeriodResult {
-  if (!isValidDateKey(startDate) || !isValidDateKey(endDate)) {
+  if (applicability === "general") {
+    return { ok: true, value: { startDate: null, endDate: null } };
+  }
+
+  if (!isValidDateKey(startDate)) {
+    return {
+      ok: false,
+      error:
+        applicability === "single"
+          ? "Choose a valid date."
+          : "Choose valid start and end dates.",
+    };
+  }
+
+  if (applicability === "single") {
+    return { ok: true, value: { startDate, endDate: startDate } };
+  }
+
+  if (!isValidDateKey(endDate)) {
     return { ok: false, error: "Choose valid start and end dates." };
   }
 
@@ -99,59 +120,40 @@ export interface BudgetFormErrors {
 
 export interface BudgetFormResult {
   ok: boolean;
-  values?: { name: string; amount: number; startDate: DateKey; endDate: DateKey };
+  values?: {
+    name: string;
+    amount: number;
+    startDate: DateKey | null;
+    endDate: DateKey | null;
+  };
   errors: BudgetFormErrors;
-}
-
-export interface BudgetFormOptions {
-  /** Existing budgets, used for the overlap check. */
-  budgets?: Budget[];
-  /** Id of the budget being edited, so it never conflicts with itself. */
-  excludeId?: string;
 }
 
 /**
  * Validates the whole budget form.
  *
- * Overlapping periods are rejected outright. Allowing them would mean an
- * expense date could match two budgets, and the app would have to either guess
- * or interrogate the user on every entry — the overlap is blocked at the one
- * place where the user can still fix it cheaply.
+ * Overlapping periods are *not* rejected. Every expense now names the budget it
+ * is charged to, so two allotments covering the same day is a choice the user
+ * makes at entry time rather than an ambiguity the data model cannot express —
+ * and a general allotment, which covers every day, would be impossible under a
+ * no-overlap rule. `findOverlaps` still reports clashes so the form can mention
+ * them; it just no longer blocks.
  */
 export function validateBudgetForm(
   name: string,
   amount: string,
+  applicability: BudgetApplicability,
   startDate: string,
   endDate: string,
-  options: BudgetFormOptions = {},
 ): BudgetFormResult {
-  const { budgets = [], excludeId } = options;
-
   const nameResult = validateBudgetName(name);
   const amountResult = validateBudgetAmount(amount);
-  const periodResult = validateBudgetPeriod(startDate, endDate);
+  const periodResult = validateBudgetPeriod(applicability, startDate, endDate);
 
   const errors: BudgetFormErrors = {};
   if (!nameResult.ok) errors.name = nameResult.error;
   if (!amountResult.ok) errors.amount = amountResult.error;
   if (!periodResult.ok) errors.period = periodResult.error;
-
-  if (periodResult.ok) {
-    const conflicts = findOverlaps(
-      budgets,
-      periodResult.value!.startDate,
-      periodResult.value!.endDate,
-      excludeId,
-    );
-
-    if (conflicts.length > 0) {
-      const first = conflicts[0];
-      errors.period =
-        `This overlaps "${first.budget.name}" ` +
-        `(${formatDateRange(first.start, first.end)}). ` +
-        `Budgets cannot share dates — adjust the period.`;
-    }
-  }
 
   if (errors.name || errors.amount || errors.period) {
     return { ok: false, errors };
@@ -223,19 +225,20 @@ export function validateExpenseAmount(
   return { ok: true, value };
 }
 
-/** Validates the expense date and that a budget was chosen for it. */
+/** Validates the expense date and that some budget could fund it. */
 export function validateExpenseDate(
   date: string,
-  applicableBudgets: Budget[],
+  eligibleBudgets: Budget[],
 ): ValidationResult<DateKey> {
   if (!isValidDateKey(date)) {
     return { ok: false, error: "Choose a valid date." };
   }
 
-  if (applicableBudgets.length === 0) {
+  if (eligibleBudgets.length === 0) {
     return {
       ok: false,
-      error: "No budget allotment covers this date.",
+      error:
+        "No budget allotment is available for this date. Create one before adding this expense.",
     };
   }
 
@@ -261,16 +264,22 @@ export interface ExpenseFormResult {
 }
 
 export interface ExpenseFormOptions extends ExpenseAmountOptions {
-  /** Budgets whose period covers the chosen date. */
-  applicableBudgets: Budget[];
+  /**
+   * Budgets that may fund this expense: those whose period covers the date,
+   * plus every general allotment. Anything outside this list is not a valid
+   * choice, whatever the client submitted.
+   */
+  eligibleBudgets: Budget[];
 }
 
 /**
  * Validates the whole expense form.
  *
- * An expense must land in exactly one budget: the date has to be covered, and
- * the chosen budget has to be one of the budgets covering it. Nothing is
- * assigned by guesswork.
+ * An expense belongs to exactly one budget, and that budget is named
+ * explicitly. The chosen id must be one the caller was actually offered, so a
+ * request naming a budget for an unrelated date — or one the account does not
+ * own, since the server passes only the user's own budgets — is refused rather
+ * than being quietly reassigned.
  */
 export function validateExpenseForm(
   name: string,
@@ -279,11 +288,11 @@ export function validateExpenseForm(
   budgetId: string,
   options: ExpenseFormOptions,
 ): ExpenseFormResult {
-  const { applicableBudgets, ...amountOptions } = options;
+  const { eligibleBudgets, ...amountOptions } = options;
 
   const nameResult = validateExpenseName(name);
   const amountResult = validateExpenseAmount(amount, amountOptions);
-  const dateResult = validateExpenseDate(expenseDate, applicableBudgets);
+  const dateResult = validateExpenseDate(expenseDate, eligibleBudgets);
 
   const errors: ExpenseFormErrors = {};
   if (!nameResult.ok) errors.name = nameResult.error;
@@ -292,9 +301,10 @@ export function validateExpenseForm(
 
   if (dateResult.ok) {
     if (budgetId.trim() === "") {
-      errors.budgetId = "Choose which budget this belongs to.";
-    } else if (!applicableBudgets.some((budget) => budget.id === budgetId)) {
-      errors.budgetId = "That budget does not cover the selected date.";
+      errors.budgetId = "Choose which budget allotment this is deducted from.";
+    } else if (!eligibleBudgets.some((budget) => budget.id === budgetId)) {
+      errors.budgetId =
+        "That budget allotment is not available for the selected date.";
     }
   }
 

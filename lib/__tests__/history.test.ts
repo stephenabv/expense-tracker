@@ -3,6 +3,7 @@ import { describe, expect, it } from "vitest";
 import {
   buildHistory,
   budgetsInFilter,
+  describeBudgetFilter,
   describeFilter,
   filterHistory,
   historyForFilter,
@@ -11,7 +12,7 @@ import {
   summarizeHistory,
   validateFilter,
 } from "@/lib/history";
-import { budget, expense } from "./helpers";
+import { budget, expense, generalBudget } from "./helpers";
 
 const week1 = budget("b1", "August Week 1", 5_000, "2026-08-01", "2026-08-05");
 const daily = budget("b2", "Daily Expenses", 1_000, "2026-08-06");
@@ -309,5 +310,154 @@ describe("budgetsInFilter", () => {
   it("excludes budgets outside the range", () => {
     const result = budgetsInFilter(budgets, { mode: "single", date: "2026-08-06" });
     expect(result.map((b) => b.id)).toEqual(["b2"]);
+  });
+});
+
+/* ------------------------------------------------- general allotments ---- */
+
+const emergency = generalBudget("b4", "Emergency Fund", 10_000);
+
+const mixedExpenses = [
+  ...expenses,
+  expense("g1", "b4", "Medicine", 1_000, "2026-08-19"),
+  expense("g2", "b4", "Food", 300, "2026-08-19"),
+  expense("g3", "b4", "Taxi", 250, "2026-09-01"),
+];
+
+describe("history with a general allotment", () => {
+  const mixedBudgets = [...budgets, emergency];
+
+  it("records its days like any other budget", () => {
+    const days = buildHistory(mixedBudgets, mixedExpenses);
+    const general = days.filter((day) => day.budgetId === "b4");
+    expect(general.map((day) => day.date)).toEqual(["2026-08-19", "2026-09-01"]);
+  });
+
+  it("chains the balance within the allotment across unrelated dates", () => {
+    const days = buildHistory(mixedBudgets, mixedExpenses);
+    const general = days.filter((day) => day.budgetId === "b4");
+    expect(general[0].startingBalance).toBe(10_000);
+    expect(general[0].endingBalance).toBe(8_700);
+    expect(general[1].startingBalance).toBe(8_700);
+    expect(general[1].endingBalance).toBe(8_450);
+  });
+
+  it("carries null dates through, rather than inventing a period", () => {
+    const days = buildHistory(mixedBudgets, mixedExpenses);
+    const general = days.find((day) => day.budgetId === "b4")!;
+    expect(general.budgetStartDate).toBeNull();
+    expect(general.budgetEndDate).toBeNull();
+
+    const dated = days.find((day) => day.budgetId === "b1")!;
+    expect(dated.budgetStartDate).toBe("2026-08-01");
+    expect(dated.budgetEndDate).toBe("2026-08-05");
+  });
+
+  it("appears in a single-date filter alongside no dated budget", () => {
+    const days = historyForFilter(mixedBudgets, mixedExpenses, {
+      mode: "single",
+      date: "2026-08-19",
+    });
+    expect(days).toHaveLength(1);
+    expect(days[0].budgetName).toBe("Emergency Fund");
+    expect(days[0].totalExpenses).toBe(1_300);
+  });
+
+  it("groups by date and budget across a range", () => {
+    const days = historyForFilter(mixedBudgets, mixedExpenses, {
+      mode: "range",
+      start: "2026-08-01",
+      end: "2026-08-19",
+    });
+    // Newest first: Aug 19 is the general allotment, Aug 6 the daily one.
+    expect(days[0].budgetName).toBe("Emergency Fund");
+    expect(days[0].date).toBe("2026-08-19");
+    expect(days.at(-1)!.date).toBe("2026-08-01");
+  });
+
+  it("is always available to a filter, having no period to intersect", () => {
+    const result = budgetsInFilter(mixedBudgets, {
+      mode: "single",
+      date: "2026-12-25",
+    });
+    expect(result.map((b) => b.id)).toEqual(["b4"]);
+  });
+
+  it("reports its own allotment and balance in the summary", () => {
+    const days = historyForFilter(mixedBudgets, mixedExpenses, { mode: "all" });
+    const summary = summarizeHistory(days);
+    const entry = summary.budgets.find((b) => b.budgetId === "b4")!;
+
+    expect(entry.budgetAmount).toBe(10_000);
+    expect(entry.totalExpenses).toBe(1_550);
+    expect(entry.remaining).toBe(8_450);
+    expect(entry.budgetStartDate).toBeNull();
+  });
+});
+
+describe("history filtered to one budget", () => {
+  const mixedBudgets = [...budgets, emergency];
+  const all = buildHistory(mixedBudgets, mixedExpenses);
+
+  it("keeps only that allotment's days", () => {
+    const days = filterHistory(all, { mode: "all", budgetId: "b4" });
+    expect(days.every((day) => day.budgetId === "b4")).toBe(true);
+    expect(days).toHaveLength(2);
+  });
+
+  it("combines with a date filter", () => {
+    const days = filterHistory(all, {
+      mode: "range",
+      start: "2026-08-01",
+      end: "2026-08-31",
+      budgetId: "b4",
+    });
+    expect(days.map((day) => day.date)).toEqual(["2026-08-19"]);
+  });
+
+  it("summarises only the selected allotment", () => {
+    const summary = summarizeHistory(
+      filterHistory(all, { mode: "all", budgetId: "b1" }),
+    );
+    expect(summary.budgetCount).toBe(1);
+    expect(summary.totalAllocated).toBe(5_000);
+    expect(summary.totalExpenses).toBe(2_300);
+  });
+
+  it("includes every budget with activity when none is selected", () => {
+    // Three of the four: the weekend budget has no expenses, and a budget with
+    // no spending is not a row of zeroes in the history.
+    expect(summarizeHistory(filterHistory(all, { mode: "all" })).budgetCount).toBe(3);
+    expect(
+      summarizeHistory(filterHistory(all, { mode: "all", budgetId: null }))
+        .budgetCount,
+    ).toBe(3);
+  });
+
+  it("describes the selection for report metadata", () => {
+    expect(describeBudgetFilter(mixedBudgets, { mode: "all", budgetId: "b4" })).toBe(
+      "Emergency Fund (No Specific Date)",
+    );
+    expect(describeBudgetFilter(mixedBudgets, { mode: "all" })).toBeNull();
+  });
+
+  it("narrows budgetsInFilter to the selection", () => {
+    expect(
+      budgetsInFilter(mixedBudgets, { mode: "all", budgetId: "b2" }).map((b) => b.id),
+    ).toEqual(["b2"]);
+  });
+});
+
+describe("budget renaming", () => {
+  it("keeps expenses attached by id and reports the current name", () => {
+    const renamed = { ...week1, name: "Groceries Budget" };
+    const days = buildHistory([renamed, daily, weekend], expenses);
+    const affected = days.filter((day) => day.budgetId === "b1");
+
+    expect(affected).toHaveLength(3);
+    expect(affected.every((day) => day.budgetName === "Groceries Budget")).toBe(true);
+    // The relationship survived the rename: the same three expenses, same totals.
+    expect(summarizeHistory(days).budgets.find((b) => b.budgetId === "b1")!
+      .totalExpenses).toBe(2_300);
   });
 });

@@ -4,7 +4,7 @@ import type { BudgetSummary } from "@/types/budget";
 import { Button } from "@/components/ui/Button";
 import { BudgetStatusBadge } from "@/components/budgets/BudgetStatusBadge";
 import { formatCurrency } from "@/lib/currency";
-import { formatDateRange } from "@/lib/dates";
+import { NO_DATE_LABEL, describeBudgetPeriodLong } from "@/lib/budgets";
 import { cn } from "@/lib/utils";
 
 function LockIcon({ open }: { open: boolean }) {
@@ -61,11 +61,17 @@ export function BudgetCard({
           <h3 className="truncate text-[0.9375rem] font-semibold tracking-tight text-foreground">
             {budget.name}
           </h3>
+          {/* Never blank: an allotment with no dates says so in the same slot
+              the dates occupy, so the missing period cannot read as missing
+              data. The status badge is suppressed below when it would only
+              repeat this line. */}
           <p className="mt-0.5 text-[0.8125rem] text-muted">
-            {formatDateRange(budget.startDate, budget.endDate)}
+            {summary.applicability === "general"
+              ? NO_DATE_LABEL
+              : describeBudgetPeriodLong(budget)}
           </p>
         </div>
-        <BudgetStatusBadge status={status} />
+        {status === "unrestricted" ? null : <BudgetStatusBadge status={status} />}
       </div>
 
       <dl className="mt-4 grid grid-cols-3 gap-3">

@@ -11,7 +11,9 @@ import autoTable from "jspdf-autotable";
 
 import type { HistoryDay, HistorySummary } from "@/types/history";
 import { formatCurrency } from "@/lib/currency";
-import { formatDateKey, formatDateRange } from "@/lib/dates";
+import { sumAmounts } from "@/lib/calculations";
+import { formatDateKey } from "@/lib/dates";
+import { NO_DATE_PERIOD_LABEL } from "@/lib/budgets";
 import {
   PDF_FONT_BOLD_BASE64,
   PDF_FONT_NAME,
@@ -31,7 +33,67 @@ export interface HistoryReportInput {
   summary: HistorySummary;
   /** Human label for the active filter, e.g. `August 1 – August 17, 2026`. */
   periodLabel: string;
+  /**
+   * The allotment the history was narrowed to, when the user picked one. Named
+   * in the report header so a single-budget export cannot be mistaken for a
+   * complete one.
+   */
+  budgetLabel?: string | null;
   generatedAt?: Date;
+}
+
+/**
+ * A budget's own applicable period, as printed in the report.
+ *
+ * Exported because the drawn page cannot be read back — the embedded font is
+ * subsetted, so the text in the PDF stream is glyph ids rather than characters.
+ * The decisions about *what* to print therefore live in these pure functions,
+ * which the tests can check directly, and the renderer below only draws them.
+ */
+export function budgetPeriodLabel(entry: {
+  budgetStartDate: string | null;
+  budgetEndDate: string | null;
+}): string {
+  if (entry.budgetStartDate === null || entry.budgetEndDate === null) {
+    return NO_DATE_PERIOD_LABEL;
+  }
+  if (entry.budgetStartDate === entry.budgetEndDate) {
+    return formatDateKey(entry.budgetStartDate);
+  }
+  return `${formatDateKey(entry.budgetStartDate)} – ${formatDateKey(entry.budgetEndDate)}`;
+}
+
+interface DateGroup {
+  date: string;
+  entries: HistoryDay[];
+  total: number;
+  expenseCount: number;
+}
+
+/** Groups the selected days by date, preserving the order they arrive in. */
+export function groupDaysByDate(input: HistoryDay[]): DateGroup[] {
+  const order: string[] = [];
+  const byDate = new Map<string, HistoryDay[]>();
+
+  for (const entry of input) {
+    const bucket = byDate.get(entry.date);
+    if (bucket) {
+      bucket.push(entry);
+    } else {
+      byDate.set(entry.date, [entry]);
+      order.push(entry.date);
+    }
+  }
+
+  return order.map((date) => {
+    const entries = byDate.get(date)!;
+    return {
+      date,
+      entries,
+      total: sumAmounts(entries.map((entry) => entry.totalExpenses)),
+      expenseCount: entries.reduce((sum, entry) => sum + entry.expenses.length, 0),
+    };
+  });
 }
 
 const timestampFormatter = new Intl.DateTimeFormat("en-PH", {
@@ -112,6 +174,28 @@ function paintFooters(doc: jsPDF, generatedAt: Date): void {
 }
 
 /**
+ * The figures printed in the report's summary block.
+ *
+ * Deliberately no single "balance" row. Each allotment is an independent pot,
+ * so one figure for "what is left" across several of them is not a number the
+ * user can act on — it would add food money to emergency money and call the
+ * result spendable. Spending genuinely does add up across budgets and is
+ * reported as such; remaining balances are reported per budget in the table
+ * below it.
+ */
+export function reportSummaryRows(
+  summary: HistorySummary,
+): Array<[string, string]> {
+  return [
+    ["Total Allocated Across Budgets", formatCurrency(summary.totalAllocated)],
+    ["Total Expenses Across Budgets", formatCurrency(summary.totalExpenses)],
+    ["Budgets", String(summary.budgetCount)],
+    ["Expense Count", String(summary.expenseCount)],
+    ["Active Days", String(summary.activeDays)],
+  ];
+}
+
+/**
  * Builds the report document.
  *
  * Only the days passed in are printed — the caller supplies exactly what the
@@ -119,6 +203,7 @@ function paintFooters(doc: jsPDF, generatedAt: Date): void {
  */
 export function buildHistoryReport(input: HistoryReportInput): jsPDF {
   const { days, summary, periodLabel } = input;
+  const budgetLabel = input.budgetLabel ?? null;
   const generatedAt = input.generatedAt ?? new Date();
 
   const doc = new jsPDF({ unit: "pt", format: "a4", compress: true });
@@ -165,6 +250,22 @@ export function buildHistoryReport(input: HistoryReportInput): jsPDF {
   doc.setTextColor(INK);
   doc.text(periodLabel, PAGE_MARGIN, y);
 
+  // A report narrowed to one allotment says so on its face; without this a
+  // single-budget export reads as the user's complete history.
+  if (budgetLabel) {
+    y += 20;
+    doc.setFont(PDF_FONT_NAME, "normal");
+    doc.setFontSize(9);
+    doc.setTextColor(MUTED);
+    doc.text("BUDGET ALLOTMENT", PAGE_MARGIN, y);
+
+    y += 15;
+    doc.setFont(PDF_FONT_NAME, "bold");
+    doc.setFontSize(11);
+    doc.setTextColor(INK);
+    doc.text(budgetLabel, PAGE_MARGIN, y);
+  }
+
   y += 22;
   horizontalRule(doc, y, contentWidth);
 
@@ -176,16 +277,7 @@ export function buildHistoryReport(input: HistoryReportInput): jsPDF {
   doc.text("SUMMARY", PAGE_MARGIN, y);
 
   y += 20;
-  const summaryRows: Array<[string, string]> = [
-    ["Total Allocated", formatCurrency(summary.totalAllocated)],
-    ["Total Expenses", formatCurrency(summary.totalExpenses)],
-    ["Total Remaining", formatCurrency(summary.totalRemaining)],
-    ["Budgets", String(summary.budgetCount)],
-    ["Expense Count", String(summary.expenseCount)],
-    ["Active Days", String(summary.activeDays)],
-  ];
-
-  for (const [label, value] of summaryRows) {
+  for (const [label, value] of reportSummaryRows(summary)) {
     labelledRow(doc, label, value, y, contentWidth);
     y += 17;
   }
@@ -212,10 +304,13 @@ export function buildHistoryReport(input: HistoryReportInput): jsPDF {
         right: PAGE_MARGIN,
         bottom: PAGE_MARGIN + FOOTER_HEIGHT,
       },
-      head: [["Budget", "Period", "Budget", "Spent", "Remaining"]],
+      head: [["Budget", "Period", "Allocated", "Spent", "Remaining"]],
+      // The period column is the budget's own applicability, not the span of
+      // its activity: a general allotment says so rather than borrowing the
+      // dates of whatever happened to be spent from it.
       body: summary.budgets.map((entry) => [
         entry.budgetName,
-        formatDateRange(entry.firstDate, entry.lastDate),
+        budgetPeriodLabel(entry),
         formatCurrency(entry.budgetAmount),
         formatCurrency(entry.totalExpenses),
         formatCurrency(entry.remaining),
@@ -274,10 +369,21 @@ export function buildHistoryReport(input: HistoryReportInput): jsPDF {
     return doc;
   }
 
-  for (const day of days) {
-    // Keep a day heading with at least the first rows of its table; starting a
-    // day at the very bottom of a page reads as an orphan.
-    const headingBlock = 74;
+  /*
+   * Details are grouped by date, then by budget within the date.
+   *
+   * Two allotments can fund spending on the same day, so a bare date heading
+   * would leave the reader unable to tell which pot a row came out of. Each
+   * budget gets its own block and its own subtotal; the date total is printed
+   * only when there is more than one, where it is genuinely new information
+   * rather than a repeat of the subtotal directly above it.
+   */
+  for (const group of groupDaysByDate(days)) {
+    const multipleBudgets = group.entries.length > 1;
+
+    // Keep a date heading with at least the first rows of its table; starting a
+    // date at the very bottom of a page reads as an orphan.
+    const headingBlock = 90;
     if (y + headingBlock > maxY) {
       doc.addPage();
       y = PAGE_MARGIN + 6;
@@ -287,83 +393,107 @@ export function buildHistoryReport(input: HistoryReportInput): jsPDF {
     doc.setFont(PDF_FONT_NAME, "bold");
     doc.setFontSize(11);
     doc.setTextColor(INK);
-    doc.text(formatDateKey(day.date), PAGE_MARGIN, y);
+    doc.text(formatDateKey(group.date), PAGE_MARGIN, y);
 
     doc.setFont(PDF_FONT_NAME, "normal");
     doc.setFontSize(9);
     doc.setTextColor(MUTED);
     const countLabel =
-      day.expenses.length === 1 ? "1 expense" : `${day.expenses.length} expenses`;
+      group.expenseCount === 1 ? "1 expense" : `${group.expenseCount} expenses`;
     doc.text(
-      `${countLabel} · ${formatCurrency(day.totalExpenses)}`,
+      `${countLabel} · ${formatCurrency(group.total)}`,
       PAGE_MARGIN + contentWidth,
       y,
       { align: "right" },
     );
 
-    // Name the allotment under every date: with several budgets in range the
-    // date alone does not say which pot the day drew from.
-    y += 13;
-    doc.setFont(PDF_FONT_NAME, "bold");
-    doc.setFontSize(9);
-    doc.setTextColor(MUTED);
-    doc.text(day.budgetName, PAGE_MARGIN, y);
+    for (const day of group.entries) {
+      // Name the allotment above every block of rows, with its applicability,
+      // so the money is always traceable to the pot it left.
+      y += 15;
+      doc.setFont(PDF_FONT_NAME, "bold");
+      doc.setFontSize(9.5);
+      doc.setTextColor(INK);
+      doc.text(day.budgetName, PAGE_MARGIN, y);
 
-    y += 6;
+      doc.setFont(PDF_FONT_NAME, "normal");
+      doc.setFontSize(8.5);
+      doc.setTextColor(MUTED);
+      doc.text(budgetPeriodLabel(day), PAGE_MARGIN + contentWidth, y, {
+        align: "right",
+      });
 
-    autoTable(doc, {
-      startY: y,
-      margin: {
-        top: PAGE_MARGIN,
-        left: PAGE_MARGIN,
-        right: PAGE_MARGIN,
-        bottom: PAGE_MARGIN + FOOTER_HEIGHT,
-      },
-      head: [["Expense", "Amount"]],
-      body: day.expenses.map((expense) => [
-        expense.name,
-        formatCurrency(expense.amount),
-      ]),
-      foot: [["Daily Total", formatCurrency(day.totalExpenses)]],
-      // Repeat the column headers when a day's table spills onto a new page.
-      showHead: "everyPage",
-      showFoot: "lastPage",
-      rowPageBreak: "avoid",
-      theme: "plain",
-      styles: {
-        font: PDF_FONT_NAME,
-        fontSize: 9.5,
-        cellPadding: { top: 5, right: 6, bottom: 5, left: 0 },
-        textColor: INK,
-        // Long names wrap instead of being cut off.
-        overflow: "linebreak",
-        valign: "top",
-      },
-      headStyles: {
-        font: PDF_FONT_NAME,
-        fontStyle: "normal",
-        fontSize: 8,
-        textColor: MUTED,
-        lineWidth: { bottom: 0.75 },
-        lineColor: RULE,
-      },
-      footStyles: {
-        font: PDF_FONT_NAME,
-        fontStyle: "bold",
-        fontSize: 9.5,
-        textColor: INK,
-        lineWidth: { top: 0.75 },
-        lineColor: RULE,
-      },
-      columnStyles: {
-        0: { cellWidth: contentWidth - 120 },
-        1: { cellWidth: 120, halign: "right" },
-      },
-    });
+      y += 6;
 
-    const finalY = (doc as unknown as { lastAutoTable?: { finalY: number } })
-      .lastAutoTable?.finalY;
-    y = typeof finalY === "number" ? finalY + 8 : y + 40;
+      autoTable(doc, {
+        startY: y,
+        margin: {
+          top: PAGE_MARGIN,
+          left: PAGE_MARGIN,
+          right: PAGE_MARGIN,
+          bottom: PAGE_MARGIN + FOOTER_HEIGHT,
+        },
+        head: [["Expense", "Amount"]],
+        body: day.expenses.map((expense) => [
+          expense.name,
+          formatCurrency(expense.amount),
+        ]),
+        foot: [
+          [
+            multipleBudgets ? `${day.budgetName} Total` : "Daily Total",
+            formatCurrency(day.totalExpenses),
+          ],
+        ],
+        // Repeat the column headers when a block spills onto a new page.
+        showHead: "everyPage",
+        showFoot: "lastPage",
+        rowPageBreak: "avoid",
+        theme: "plain",
+        styles: {
+          font: PDF_FONT_NAME,
+          fontSize: 9.5,
+          cellPadding: { top: 5, right: 6, bottom: 5, left: 0 },
+          textColor: INK,
+          // Long names wrap instead of being cut off.
+          overflow: "linebreak",
+          valign: "top",
+        },
+        headStyles: {
+          font: PDF_FONT_NAME,
+          fontStyle: "normal",
+          fontSize: 8,
+          textColor: MUTED,
+          lineWidth: { bottom: 0.75 },
+          lineColor: RULE,
+        },
+        footStyles: {
+          font: PDF_FONT_NAME,
+          fontStyle: "bold",
+          fontSize: 9.5,
+          textColor: INK,
+          lineWidth: { top: 0.75 },
+          lineColor: RULE,
+        },
+        columnStyles: {
+          0: { cellWidth: contentWidth - 120 },
+          1: { cellWidth: 120, halign: "right" },
+        },
+      });
+
+      const finalY = (doc as unknown as { lastAutoTable?: { finalY: number } })
+        .lastAutoTable?.finalY;
+      y = typeof finalY === "number" ? finalY + 8 : y + 40;
+    }
+
+    if (multipleBudgets) {
+      if (y + 24 > maxY) {
+        doc.addPage();
+        y = PAGE_MARGIN + 6;
+      }
+      y += 8;
+      labelledRow(doc, "Daily Total", formatCurrency(group.total), y, contentWidth);
+      y += 10;
+    }
   }
 
   paintFooters(doc, generatedAt);

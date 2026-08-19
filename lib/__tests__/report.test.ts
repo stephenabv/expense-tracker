@@ -1,8 +1,14 @@
 import { describe, expect, it } from "vitest";
 
-import { buildHistoryReport, historyReportFilename } from "@/lib/pdf/report";
-import { buildHistory, summarizeHistory } from "@/lib/history";
-import { budget, expense } from "./helpers";
+import {
+  budgetPeriodLabel,
+  buildHistoryReport,
+  groupDaysByDate,
+  historyReportFilename,
+  reportSummaryRows,
+} from "@/lib/pdf/report";
+import { buildHistory, filterHistory, summarizeHistory } from "@/lib/history";
+import { budget, expense, generalBudget } from "./helpers";
 
 const generatedAt = new Date(2026, 7, 18, 9, 30);
 
@@ -94,7 +100,7 @@ describe("buildHistoryReport", () => {
     });
     const manyExpenses = many.flatMap((b, i) =>
       Array.from({ length: 8 }, (_, j) =>
-        expense(`${i}-${j}`, b.id, `Expense ${j + 1}`, 100 + j, b.startDate),
+        expense(`${i}-${j}`, b.id, `Expense ${j + 1}`, 100 + j, b.startDate!),
       ),
     );
 
@@ -208,5 +214,203 @@ describe("historyReportFilename", () => {
     expect(historyReportFilename(summarizeHistory([]), generatedAt)).toBe(
       "expense-tracker-history-20260818.pdf",
     );
+  });
+});
+
+/* ------------------------------------------- multiple and general budgets -- */
+
+const emergency = generalBudget("b4", "Emergency Fund", 10_000);
+
+const mixedBudgets = [week1, daily, emergency];
+const mixedExpenses = [
+  ...expenses,
+  expense("g1", "b4", "Medicine", 1_000, "2026-08-19"),
+  expense("g2", "b4", "Food", 300, "2026-08-19"),
+  // Same day as a dated budget, so one date has two allotments.
+  expense("g3", "b4", "Emergency taxi", 250, "2026-08-06"),
+];
+
+const mixedDays = buildHistory(mixedBudgets, mixedExpenses).reverse();
+
+describe("budgetPeriodLabel", () => {
+  it("names a general allotment rather than printing a blank period", () => {
+    expect(
+      budgetPeriodLabel({ budgetStartDate: null, budgetEndDate: null }),
+    ).toBe("No Specific Date");
+  });
+
+  it("prints a single date once", () => {
+    expect(
+      budgetPeriodLabel({
+        budgetStartDate: "2026-08-06",
+        budgetEndDate: "2026-08-06",
+      }),
+    ).toBe("August 6, 2026");
+  });
+
+  it("prints both ends of a range", () => {
+    expect(
+      budgetPeriodLabel({
+        budgetStartDate: "2026-08-01",
+        budgetEndDate: "2026-08-05",
+      }),
+    ).toBe("August 1, 2026 – August 5, 2026");
+  });
+});
+
+describe("groupDaysByDate", () => {
+  it("puts every allotment that spent on a date into one group", () => {
+    const groups = groupDaysByDate(mixedDays);
+    const aug6 = groups.find((group) => group.date === "2026-08-06")!;
+
+    expect(aug6.entries.map((entry) => entry.budgetName).sort()).toEqual([
+      "Daily Expenses",
+      "Emergency Fund",
+    ]);
+  });
+
+  it("totals the date across its allotments", () => {
+    const aug6 = groupDaysByDate(mixedDays).find((g) => g.date === "2026-08-06")!;
+    // 100 + 300 from the daily budget, 250 from the emergency fund.
+    expect(aug6.total).toBe(650);
+    expect(aug6.expenseCount).toBe(3);
+  });
+
+  it("keeps a single-budget date to one block", () => {
+    const aug19 = groupDaysByDate(mixedDays).find((g) => g.date === "2026-08-19")!;
+    expect(aug19.entries).toHaveLength(1);
+    expect(aug19.total).toBe(1_300);
+  });
+
+  it("preserves the order the days arrive in", () => {
+    expect(groupDaysByDate(mixedDays).map((g) => g.date)).toEqual([
+      "2026-08-19",
+      "2026-08-06",
+      "2026-08-05",
+    ]);
+  });
+});
+
+describe("reportSummaryRows", () => {
+  const summary = summarizeHistory(mixedDays);
+
+  it("labels the combined figure as a total across budgets", () => {
+    const labels = reportSummaryRows(summary).map(([label]) => label);
+    expect(labels).toContain("Total Expenses Across Budgets");
+  });
+
+  it("never presents a combined remaining balance", () => {
+    // Two allotments' leftovers are not one spendable figure.
+    const labels = reportSummaryRows(summary).map(([label]) => label);
+    expect(labels.some((label) => /remaining/i.test(label))).toBe(false);
+  });
+
+  it("adds spending across every selected budget", () => {
+    const row = reportSummaryRows(summary).find(
+      ([label]) => label === "Total Expenses Across Budgets",
+    )!;
+    // 800 (week 1) + 400 (daily) + 1,550 (emergency)
+    expect(row[1]).toBe("₱2,750.00");
+  });
+});
+
+describe("per-budget accounting in the report", () => {
+  it("keeps a general allotment's balance separate from the dated ones", () => {
+    const summary = summarizeHistory(mixedDays);
+    const fund = summary.budgets.find((b) => b.budgetId === "b4")!;
+
+    expect(fund.budgetAmount).toBe(10_000);
+    expect(fund.totalExpenses).toBe(1_550);
+    expect(fund.remaining).toBe(8_450);
+    expect(budgetPeriodLabel(fund)).toBe("No Specific Date");
+  });
+
+  it("reports each allotment's own period, not its activity span", () => {
+    const summary = summarizeHistory(mixedDays);
+    const week = summary.budgets.find((b) => b.budgetId === "b1")!;
+
+    // Spending happened only on Aug 5, but the budget runs Aug 1–5.
+    expect(week.firstDate).toBe("2026-08-05");
+    expect(budgetPeriodLabel(week)).toBe("August 1, 2026 – August 5, 2026");
+  });
+});
+
+describe("reports containing several budgets", () => {
+  it("renders a mixed dated and general report", () => {
+    const doc = buildHistoryReport({
+      days: mixedDays,
+      summary: summarizeHistory(mixedDays),
+      periodLabel: "August 5 – August 19, 2026",
+      generatedAt,
+    });
+    expect(header(toBytes(doc))).toBe("%PDF-");
+    // Three allotments over three dates stays compact; the point is that it
+    // paginates rather than overflowing a page.
+    expect(doc.getNumberOfPages()).toBeLessThanOrEqual(2);
+  });
+
+  it("renders a report narrowed to one allotment", () => {
+    const filtered = filterHistory(buildHistory(mixedBudgets, mixedExpenses), {
+      mode: "all",
+      budgetId: "b4",
+    });
+
+    const doc = buildHistoryReport({
+      days: filtered,
+      summary: summarizeHistory(filtered),
+      periodLabel: "All recorded history",
+      budgetLabel: "Emergency Fund (No Specific Date)",
+      generatedAt,
+    });
+
+    expect(header(toBytes(doc))).toBe("%PDF-");
+    // Only the chosen allotment's records reach the document.
+    expect(filtered.every((day) => day.budgetId === "b4")).toBe(true);
+    expect(summarizeHistory(filtered).budgetCount).toBe(1);
+  });
+});
+
+describe("PDF data matches the active filter", () => {
+  const all = buildHistory(mixedBudgets, mixedExpenses);
+
+  it("exports exactly the days a single-date filter selected", () => {
+    const filter = { mode: "single", date: "2026-08-19" } as const;
+    const days = filterHistory(all, filter);
+    const summary = summarizeHistory(days);
+
+    expect(days.map((day) => day.date)).toEqual(["2026-08-19"]);
+    expect(summary.totalExpenses).toBe(1_300);
+    expect(header(toBytes(buildHistoryReport({
+      days,
+      summary,
+      periodLabel: "August 19, 2026",
+      generatedAt,
+    })))).toBe("%PDF-");
+  });
+
+  it("exports exactly the days a range filter selected", () => {
+    const days = filterHistory(all, {
+      mode: "range",
+      start: "2026-08-05",
+      end: "2026-08-06",
+    });
+
+    expect(new Set(days.map((day) => day.date))).toEqual(
+      new Set(["2026-08-05", "2026-08-06"]),
+    );
+    expect(summarizeHistory(days).totalExpenses).toBe(1_450);
+  });
+
+  it("drops the other allotments when one is selected", () => {
+    const days = filterHistory(all, {
+      mode: "range",
+      start: "2026-08-01",
+      end: "2026-08-31",
+      budgetId: "b2",
+    });
+
+    expect(days).toHaveLength(1);
+    expect(days[0].budgetName).toBe("Daily Expenses");
+    expect(summarizeHistory(days).totalExpenses).toBe(400);
   });
 });

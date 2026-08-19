@@ -2,20 +2,32 @@
 
 import Link from "next/link";
 
-import type { BudgetSummary } from "@/types/budget";
+import type { Budget, BudgetSummary } from "@/types/budget";
 import { BudgetStatusBadge } from "@/components/budgets/BudgetStatusBadge";
 import { formatCurrency } from "@/lib/currency";
-import { formatShortDateRange } from "@/lib/dates";
+import { describeBudgetPeriod } from "@/lib/budgets";
 import { cn } from "@/lib/utils";
 
-/** At-a-glance list of every allotment and what each has left. */
+export interface BudgetOverviewProps {
+  summaries: BudgetSummary[];
+  /** Ids of the allotments that can fund an expense dated today. */
+  availableIds?: Set<string>;
+  /** Opens one allotment's detail. */
+  onSelect?: (budget: Budget) => void;
+}
+
+/**
+ * Every allotment and what each has left.
+ *
+ * The balances are listed side by side and never summed: they are separate
+ * pots, and one total would suggest a single spendable figure that does not
+ * exist.
+ */
 export function BudgetOverview({
   summaries,
-  currentBudgetId,
-}: {
-  summaries: BudgetSummary[];
-  currentBudgetId?: string;
-}) {
+  availableIds,
+  onSelect,
+}: BudgetOverviewProps) {
   if (summaries.length === 0) return null;
 
   return (
@@ -39,40 +51,62 @@ export function BudgetOverview({
       </div>
 
       <ul className="divide-y divide-border-subtle">
-        {summaries.map((summary) => (
-          <li
-            key={summary.budget.id}
-            className="flex items-center gap-3 px-4 py-3 sm:px-5"
-          >
-            <div className="min-w-0 flex-1">
-              <p className="flex items-center gap-2 truncate text-[0.9375rem] font-medium text-foreground">
-                <span className="truncate">{summary.budget.name}</span>
-                {summary.budget.id === currentBudgetId ? (
-                  <span className="shrink-0 rounded-full bg-foreground px-1.5 py-0.5 text-[0.625rem] font-semibold uppercase tracking-wide text-background">
-                    Now
-                  </span>
-                ) : null}
-              </p>
-              <p className="truncate text-[0.8125rem] text-muted">
-                {formatShortDateRange(summary.budget.startDate, summary.budget.endDate)}
-              </p>
-            </div>
+        {summaries.map((summary) => {
+          const available = availableIds?.has(summary.budget.id) ?? false;
 
-            <div className="shrink-0 text-right">
-              <p
-                className={cn(
-                  "text-[0.9375rem] font-semibold tabular",
-                  summary.isOverspent ? "text-danger" : "text-foreground",
-                )}
-              >
-                {formatCurrency(summary.remaining)}
-              </p>
-              <p className="text-[0.75rem] text-muted">left</p>
-            </div>
+          const row = (
+            <>
+              <div className="min-w-0 flex-1">
+                <div className="flex min-w-0 items-center gap-2">
+                  <p className="min-w-0 truncate text-[0.9375rem] font-medium text-foreground">
+                    {summary.budget.name}
+                  </p>
+                  {available ? (
+                    <span className="shrink-0 rounded-full bg-foreground px-1.5 py-0.5 text-[0.625rem] font-semibold uppercase tracking-wide text-background">
+                      Available
+                    </span>
+                  ) : null}
+                </div>
+                <p className="truncate text-[0.8125rem] text-muted">
+                  {describeBudgetPeriod(summary.budget)}
+                </p>
+              </div>
 
-            <BudgetStatusBadge status={summary.status} className="hidden sm:inline-flex" />
-          </li>
-        ))}
+              <div className="shrink-0 text-right">
+                <p
+                  className={cn(
+                    "text-[0.9375rem] font-semibold tabular",
+                    summary.isOverspent ? "text-danger" : "text-foreground",
+                  )}
+                >
+                  {formatCurrency(summary.remaining)}
+                </p>
+                <p className="text-[0.75rem] text-muted">remaining</p>
+              </div>
+
+              <span className="hidden shrink-0 sm:block">
+                <BudgetStatusBadge status={summary.status} />
+              </span>
+            </>
+          );
+
+          return (
+            <li key={summary.budget.id}>
+              {onSelect ? (
+                <button
+                  type="button"
+                  onClick={() => onSelect(summary.budget)}
+                  aria-label={`View ${summary.budget.name}`}
+                  className="flex w-full items-center gap-3 px-4 py-3 text-left transition-colors duration-150 hover:bg-surface-muted focus-visible:outline-2 focus-visible:-outline-offset-2 focus-visible:outline-ring sm:px-5"
+                >
+                  {row}
+                </button>
+              ) : (
+                <div className="flex items-center gap-3 px-4 py-3 sm:px-5">{row}</div>
+              )}
+            </li>
+          );
+        })}
       </ul>
     </section>
   );

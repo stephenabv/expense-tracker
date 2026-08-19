@@ -8,7 +8,8 @@ import { Modal } from "@/components/ui/Modal";
 import { Button } from "@/components/ui/Button";
 import { BudgetStatusBadge } from "@/components/budgets/BudgetStatusBadge";
 import { formatCurrency } from "@/lib/currency";
-import { formatDateKey, formatDateRange } from "@/lib/dates";
+import { formatDateKey } from "@/lib/dates";
+import { describeBudgetPeriodLong } from "@/lib/budgets";
 import { cn } from "@/lib/utils";
 
 export interface BudgetDetailModalProps {
@@ -34,7 +35,7 @@ export function BudgetDetailModal({ open, onClose, budget }: BudgetDetailModalPr
       open={open}
       onClose={onClose}
       title={budget.name}
-      description={formatDateRange(budget.startDate, budget.endDate)}
+      description={describeBudgetPeriodLong(budget)}
       footer={
         <Button variant="secondary" className="flex-1" onClick={onClose}>
           Close
@@ -45,7 +46,11 @@ export function BudgetDetailModal({ open, onClose, budget }: BudgetDetailModalPr
         <div className="flex items-center justify-between gap-3">
           <BudgetStatusBadge status={summary.status} />
           <span className="text-[0.8125rem] text-muted">
-            {summary.durationDays === 1 ? "1 day" : `${summary.durationDays} days`}
+            {summary.durationDays === null
+              ? "Any date"
+              : summary.durationDays === 1
+                ? "1 day"
+                : `${summary.durationDays} days`}
           </span>
         </div>
 

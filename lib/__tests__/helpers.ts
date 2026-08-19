@@ -3,12 +3,19 @@
 import type { Budget } from "@/types/budget";
 import type { Expense } from "@/types/expense";
 
+/**
+ * A budget fixture.
+ *
+ * Passing `null` for the dates builds a general allotment — the same two nulls
+ * the database stores, so the tests exercise the real representation rather
+ * than a stand-in.
+ */
 export function budget(
   id: string,
   name: string,
   amount: number,
-  startDate: string,
-  endDate: string = startDate,
+  startDate: string | null,
+  endDate: string | null = startDate,
   overrides: Partial<Budget> = {},
 ): Budget {
   return {
@@ -16,12 +23,22 @@ export function budget(
     name,
     amount,
     startDate,
-    endDate,
+    endDate: startDate === null ? null : endDate,
     createdAt: "2026-08-01T00:00:00.000Z",
     updatedAt: "2026-08-01T00:00:00.000Z",
     locked: true,
     ...overrides,
   };
+}
+
+/** A general allotment: available whatever the expense date. */
+export function generalBudget(
+  id: string,
+  name: string,
+  amount: number,
+  overrides: Partial<Budget> = {},
+): Budget {
+  return budget(id, name, amount, null, null, overrides);
 }
 
 export function expense(

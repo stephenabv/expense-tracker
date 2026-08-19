@@ -2,6 +2,7 @@
 
 import { useEffect, useMemo, useRef, useState } from "react";
 
+import type { Budget } from "@/types/budget";
 import type { Expense } from "@/types/expense";
 import { useTracker } from "@/components/providers/TrackerProvider";
 import { useToast } from "@/components/ui/Toast";
@@ -16,7 +17,8 @@ import {
   formatCurrency,
   parseAmount,
 } from "@/lib/currency";
-import { formatDateKey, formatDateRange, todayKey } from "@/lib/dates";
+import { formatDateKey, todayKey } from "@/lib/dates";
+import { describeBudgetPeriod, describeBudgetPeriodLong } from "@/lib/budgets";
 import {
   MAX_NAME_LENGTH,
   validateExpenseForm,
@@ -30,17 +32,29 @@ export interface ExpenseFormModalProps {
   onClose: () => void;
   /** Provide an expense to edit it; omit to create a new one. */
   expense?: Expense | null;
-  /** Opens the budget form when no allotment covers the chosen date. */
+  /** Opens the budget form when no allotment is available for the date. */
   onCreateBudget?: (date: string) => void;
+}
+
+/** One option row: the budget's name, when it applies, and what it has left. */
+function budgetOptionLabel(budget: Budget, balance: number): string {
+  return `${budget.name} · ${describeBudgetPeriod(budget)} · ${formatCurrency(
+    Math.max(balance, 0),
+  )} left`;
 }
 
 /**
  * Shared add/edit expense form.
  *
- * The expense date drives everything: it decides which allotment applies, and
- * the amount is measured against *that* budget's balance. When no budget covers
- * the date the form says so and offers to create one, rather than quietly
- * charging an unrelated allotment.
+ * Every expense names the allotment it is deducted from. The date narrows the
+ * choice — a budget for an unrelated period is never offered — but it never
+ * makes the choice: with more than one eligible allotment the user must say
+ * which pot pays, because only they know whether today's medicine comes out of
+ * the daily allowance or the emergency fund.
+ *
+ * Changing the date re-derives the options. If the budget already chosen no
+ * longer applies, the selection is cleared and the form says why, rather than
+ * leaving the expense attached to an allotment that cannot fund it.
  */
 export function ExpenseFormModal({
   open,
@@ -60,6 +74,16 @@ export function ExpenseFormModal({
   const [expenseDate, setExpenseDate] = useState(today);
   const [budgetId, setBudgetId] = useState("");
   const [errors, setErrors] = useState<ExpenseFormErrors>({});
+  /** Set when a date change invalidated the budget that was selected. */
+  const [displaced, setDisplaced] = useState(false);
+  /**
+   * Whether the current selection came from the user.
+   *
+   * An allotment auto-selected because it was the only option is not a choice;
+   * if the date later makes several eligible, that selection is dropped and the
+   * user is asked, rather than the form quietly keeping a pot they never picked.
+   */
+  const [chosenByUser, setChosenByUser] = useState(false);
   const nameRef = useRef<HTMLInputElement>(null);
 
   useEffect(() => {
@@ -70,33 +94,64 @@ export function ExpenseFormModal({
     setAmount(expense ? formatAmount(expense.amount) : "");
     setExpenseDate(date);
     setBudgetId(expense?.budgetId ?? "");
+    // An expense being edited already carries a deliberate assignment.
+    setChosenByUser(expense !== null);
     setErrors({});
+    setDisplaced(false);
   }, [open, expense, today]);
 
-  // Budgets whose period covers the chosen date. Overlaps are prevented, so
-  // this is normally exactly one — but the form still handles several rather
-  // than assuming.
-  const applicable = useMemo(() => {
+  // Budgets that may fund this date: those whose period covers it, plus every
+  // general allotment. Anything else is not an option at all.
+  const eligible = useMemo(() => {
     if (!open) return [];
     return budgetsCovering(expenseDate);
   }, [open, expenseDate, budgetsCovering]);
 
-  // Auto-select when there is only one valid choice; never guess between two.
+  /*
+   * Keep the selection honest as the date moves.
+   *
+   * One eligible budget is selected automatically — there is nothing to decide,
+   * and the form still names it. Beyond that the form never resolves the
+   * choice: if the date brings a second eligible allotment into play, or
+   * invalidates the one selected, the selection is cleared and the user picks.
+   */
   useEffect(() => {
     if (!open) return;
-    if (applicable.length === 1) {
-      setBudgetId(applicable[0].id);
-    } else if (!applicable.some((budget) => budget.id === budgetId)) {
+
+    const stillValid = eligible.some((budget) => budget.id === budgetId);
+
+    if (stillValid) {
+      // A selection the user did not make cannot stand once there is a choice.
+      if (!chosenByUser && eligible.length > 1) setBudgetId("");
+      return;
+    }
+
+    if (budgetId !== "") setDisplaced(true);
+
+    if (eligible.length === 1) {
+      setBudgetId(eligible[0].id);
+      setChosenByUser(false);
+    } else {
       setBudgetId("");
     }
-  }, [open, applicable, budgetId]);
+  }, [open, eligible, budgetId, chosenByUser]);
 
-  const selectedBudget = applicable.find((budget) => budget.id === budgetId) ?? null;
+  const selectedBudget = eligible.find((budget) => budget.id === budgetId) ?? null;
 
   const availableBalance = useMemo(() => {
     if (!open || !selectedBudget) return 0;
     return availableBalanceFor(selectedBudget.id, expense?.id);
   }, [open, selectedBudget, availableBalanceFor, expense?.id]);
+
+  /** Balances for the option labels, so the user can choose with the figures. */
+  const balances = useMemo(() => {
+    const map = new Map<string, number>();
+    if (!open) return map;
+    for (const budget of eligible) {
+      map.set(budget.id, availableBalanceFor(budget.id, expense?.id));
+    }
+    return map;
+  }, [open, eligible, availableBalanceFor, expense?.id]);
 
   const parsedAmount = parseAmount(amount);
   const exceedsBalance =
@@ -105,13 +160,14 @@ export function ExpenseFormModal({
     parsedAmount > 0 &&
     parsedAmount > availableBalance;
 
-  const noBudget = applicable.length === 0;
+  const noBudget = eligible.length === 0;
+  const mustChoose = eligible.length > 1;
 
   const handleSubmit = (event: React.FormEvent) => {
     event.preventDefault();
 
     const result = validateExpenseForm(name, amount, expenseDate, budgetId, {
-      applicableBudgets: applicable,
+      eligibleBudgets: eligible,
       availableBalance: selectedBudget ? availableBalance : undefined,
     });
 
@@ -141,8 +197,10 @@ export function ExpenseFormModal({
       title={isEditing ? "Edit Expense" : "Add Expense"}
       description={
         selectedBudget
-          ? `${selectedBudget.name} · ${formatCurrency(Math.max(availableBalance, 0))} available`
-          : "Choose a date covered by one of your budget allotments."
+          ? `Deducted from ${selectedBudget.name} · ${formatCurrency(
+              Math.max(availableBalance, 0),
+            )} available`
+          : "Choose the allotment this expense is deducted from."
       }
       footer={
         <>
@@ -193,7 +251,7 @@ export function ExpenseFormModal({
         />
 
         <DateField
-          label="Date"
+          label="Expense Date"
           value={expenseDate}
           invalid={errors.expenseDate !== undefined}
           onChange={(event) => {
@@ -213,11 +271,12 @@ export function ExpenseFormModal({
             className="rounded-xl border border-warning/30 bg-warning-soft p-3.5"
           >
             <p className="text-sm font-medium text-warning">
-              No budget is assigned to this date.
+              No budget allotment is available.
             </p>
             <p className="mt-1 text-[0.8125rem] text-muted-strong">
-              There is currently no budget allotment covering{" "}
-              {formatDateKey(expenseDate)}.
+              Nothing covers {formatDateKey(expenseDate)}, and you have no
+              allotment without a date restriction. Please create a budget
+              allotment before adding this expense.
             </p>
             {onCreateBudget ? (
               <Button
@@ -230,29 +289,61 @@ export function ExpenseFormModal({
             ) : null}
           </div>
         ) : (
-          <SelectField
-            label="Budget"
-            value={budgetId}
-            error={errors.budgetId}
-            hint={
-              selectedBudget
-                ? `Applies ${formatDateRange(selectedBudget.startDate, selectedBudget.endDate)}`
-                : "Two budgets cover this date — pick the one this belongs to."
-            }
-            onChange={(event) => {
-              setBudgetId(event.target.value);
-              setErrors((prev) => ({ ...prev, budgetId: undefined, amount: undefined }));
-            }}
-          >
-            {applicable.length > 1 ? (
-              <option value="">Select a budget…</option>
+          <>
+            <SelectField
+              label="Budget Allotment"
+              value={budgetId}
+              error={errors.budgetId}
+              hint={
+                selectedBudget
+                  ? `${describeBudgetPeriodLong(selectedBudget)} · deducted from this allotment`
+                  : "Several allotments can fund this date — choose the one this belongs to."
+              }
+              onChange={(event) => {
+                setBudgetId(event.target.value);
+                setChosenByUser(event.target.value !== "");
+                setDisplaced(false);
+                setErrors((prev) => ({
+                  ...prev,
+                  budgetId: undefined,
+                  amount: undefined,
+                }));
+              }}
+            >
+              {/* No blank option when there is only one choice: it is already
+                  selected, and offering "none" would invite an invalid form. */}
+              {mustChoose ? <option value="">Select a budget…</option> : null}
+              {eligible.map((budget) => (
+                <option key={budget.id} value={budget.id}>
+                  {budgetOptionLabel(budget, balances.get(budget.id) ?? 0)}
+                </option>
+              ))}
+            </SelectField>
+
+            {displaced && !budgetId ? (
+              <p
+                role="status"
+                className="rounded-xl border border-warning/30 bg-warning-soft p-3.5 text-[0.8125rem] text-muted-strong"
+              >
+                <span className="font-medium text-warning">
+                  That date changed which allotments apply.
+                </span>{" "}
+                The budget you had chosen cannot fund{" "}
+                {formatDateKey(expenseDate)} — pick one of the allotments above.
+              </p>
             ) : null}
-            {applicable.map((budget) => (
-              <option key={budget.id} value={budget.id}>
-                {budget.name}
-              </option>
-            ))}
-          </SelectField>
+
+            {selectedBudget ? (
+              <dl className="rounded-xl border border-border-subtle bg-surface-muted p-3.5 text-[0.8125rem]">
+                <div className="flex items-center justify-between gap-4">
+                  <dt className="text-muted">Available Balance</dt>
+                  <dd className="font-semibold tabular text-foreground">
+                    {formatCurrency(Math.max(availableBalance, 0))}
+                  </dd>
+                </div>
+              </dl>
+            ) : null}
+          </>
         )}
 
         {exceedsBalance && selectedBudget ? (
@@ -261,24 +352,25 @@ export function ExpenseFormModal({
             className="rounded-xl border border-danger/30 bg-danger-soft p-3.5"
           >
             <p className="text-sm font-medium text-danger">
-              This is more than {selectedBudget.name} has left.
+              Insufficient budget balance.
             </p>
             <dl className="mt-2 space-y-1 text-[0.8125rem]">
               <div className="flex items-center justify-between gap-4">
-                <dt className="text-muted-strong">Available balance</dt>
+                <dt className="text-muted-strong">Available</dt>
                 <dd className="font-medium tabular text-foreground">
                   {formatCurrency(Math.max(availableBalance, 0))}
                 </dd>
               </div>
               <div className="flex items-center justify-between gap-4">
-                <dt className="text-muted-strong">This expense</dt>
+                <dt className="text-muted-strong">Expense</dt>
                 <dd className="font-medium tabular text-foreground">
                   {formatCurrency(parsedAmount ?? 0)}
                 </dd>
               </div>
             </dl>
             <p className="mt-2 text-[0.8125rem] text-muted-strong">
-              Lower the amount, or raise this budget&apos;s allotment first.
+              Lower the amount, choose another allotment, or raise{" "}
+              {selectedBudget.name} first.
             </p>
           </div>
         ) : null}

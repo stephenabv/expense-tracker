@@ -2,29 +2,38 @@
 
 import type { HistorySummary } from "@/types/history";
 import { formatCurrency } from "@/lib/currency";
-import { formatDateRange } from "@/lib/dates";
+import { describeBudgetPeriod } from "@/lib/budgets";
 import { cn } from "@/lib/utils";
 
 export interface HistorySummaryCardProps {
   summary: HistorySummary;
   periodLabel: string;
+  /** Set when the history is narrowed to a single allotment. */
+  budgetLabel?: string | null;
 }
 
 /**
  * Aggregate figures for the selected period.
  *
- * Budgets are independent pots, so allotments and remaining balances are added
- * across budgets. Within a budget they are point-in-time values and are never
- * summed across days — the per-budget rows below show each one separately.
+ * Spending adds up across budgets, so a combined expense total is a real
+ * number. A combined *balance* is not: each allotment is its own pot, and one
+ * "remaining" figure spanning several of them is not money the user can spend.
+ * The labels say "across budgets" for that reason, and per-budget balances are
+ * listed separately below.
  */
-export function HistorySummaryCard({ summary, periodLabel }: HistorySummaryCardProps) {
+export function HistorySummaryCard({
+  summary,
+  periodLabel,
+  budgetLabel = null,
+}: HistorySummaryCardProps) {
   const rows: Array<{ label: string; value: string; tone?: "danger" }> = [
-    { label: "Total Allocated", value: formatCurrency(summary.totalAllocated) },
-    { label: "Total Expenses", value: formatCurrency(summary.totalExpenses) },
     {
-      label: "Total Remaining",
-      value: formatCurrency(summary.totalRemaining),
-      tone: summary.totalRemaining < 0 ? "danger" : undefined,
+      label: "Total Allocated Across Budgets",
+      value: formatCurrency(summary.totalAllocated),
+    },
+    {
+      label: "Total Expenses Across Budgets",
+      value: formatCurrency(summary.totalExpenses),
     },
   ];
 
@@ -42,6 +51,13 @@ export function HistorySummaryCard({ summary, periodLabel }: HistorySummaryCardP
       >
         {periodLabel}
       </h2>
+
+      {budgetLabel ? (
+        <p className="mt-1.5 text-sm text-muted">
+          Showing <span className="font-medium text-foreground">{budgetLabel}</span>{" "}
+          only.
+        </p>
+      ) : null}
 
       <dl className="mt-5 space-y-2.5">
         {rows.map((row) => (
@@ -91,8 +107,14 @@ export function HistorySummaryCard({ summary, periodLabel }: HistorySummaryCardP
                   <p className="truncate text-[0.9375rem] font-medium text-foreground">
                     {entry.budgetName}
                   </p>
+                  {/* The allotment's own applicability, not the span of its
+                      activity — a general budget must not appear to have been
+                      limited to the days it happened to be spent on. */}
                   <p className="shrink-0 text-[0.8125rem] text-muted">
-                    {formatDateRange(entry.firstDate, entry.lastDate)}
+                    {describeBudgetPeriod({
+                      startDate: entry.budgetStartDate,
+                      endDate: entry.budgetEndDate,
+                    })}
                   </p>
                 </div>
 

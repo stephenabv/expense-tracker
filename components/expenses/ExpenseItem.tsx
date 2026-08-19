@@ -75,15 +75,17 @@ export function ExpenseItem({
         <p className="truncate text-[0.9375rem] font-medium text-foreground">
           {expense.name}
         </p>
-        <p className="truncate text-[0.8125rem] text-muted">
+        <p className="text-[0.8125rem] text-muted">
           <time dateTime={expense.expenseDate}>{dateLabel}</time>
-          {budgetName ? (
-            <>
-              {" · "}
-              <span className="text-muted-strong">{budgetName}</span>
-            </>
-          ) : null}
         </p>
+        {/* The allotment gets its own line: sharing one with the date left it
+            truncated to "Emerge…" on a phone, which is no answer to "where did
+            this money come from?". */}
+        {budgetName ? (
+          <p className="truncate text-[0.8125rem] font-medium text-muted-strong">
+            {budgetName}
+          </p>
+        ) : null}
       </div>
 
       <p className="shrink-0 text-[0.9375rem] font-semibold tabular text-foreground">

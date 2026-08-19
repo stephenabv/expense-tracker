@@ -2,17 +2,17 @@
 
 import { useState } from "react";
 
+import type { Budget } from "@/types/budget";
 import { useTracker } from "@/components/providers/TrackerProvider";
 import { AppShell } from "@/components/layout/AppShell";
 import { Button } from "@/components/ui/Button";
+import { BudgetDetailModal } from "@/components/budgets/BudgetDetailModal";
 import { BudgetFormModal } from "@/components/budgets/BudgetFormModal";
 import { BudgetOverview } from "@/components/dashboard/BudgetOverview";
-import { CurrentBudgetCard } from "@/components/dashboard/CurrentBudgetCard";
 import { DashboardSkeleton } from "@/components/dashboard/DashboardSkeleton";
 import { AddExpenseButton } from "@/components/expenses/AddExpenseButton";
 import { AddExpenseModal } from "@/components/expenses/AddExpenseModal";
 import { ExpenseList } from "@/components/expenses/ExpenseList";
-import { formatDateKey, todayKey } from "@/lib/dates";
 import { CURRENCY_SYMBOL } from "@/lib/currency";
 
 /** First run: nothing exists yet, so ask for one budget and nothing else. */
@@ -31,48 +31,35 @@ function Welcome({ onCreate }: { onCreate: () => void }) {
           Create your first budget
         </h1>
         <p className="mt-1.5 text-sm text-muted">
-          A budget allotment is one financial period — a day, a weekend, a whole
-          month — with its own amount. Expenses are charged to the allotment
-          covering their date.
+          A budget allotment is an independent source of funds. Give it a day, a
+          date range, or no date at all — then choose which allotment each
+          expense comes out of.
         </p>
 
         <Button onClick={onCreate} className="mt-6 w-full">
-          Add Budget Allotment
+          Create Budget Allotment
         </Button>
       </div>
     </div>
   );
 }
 
-/** No allotment covers today, though others exist for other periods. */
-function NoBudgetToday({ onCreate }: { onCreate: () => void }) {
-  return (
-    <section className="rounded-2xl border border-border-subtle bg-surface p-5 shadow-card sm:p-7">
-      <p className="text-[0.8125rem] font-medium tracking-wide text-muted">
-        Current Budget
-      </p>
-      <h2 className="mt-1 text-xl font-semibold tracking-tight text-foreground">
-        No budget covers today
-      </h2>
-      <p className="mt-1.5 text-sm text-muted">
-        Nothing is allotted for {formatDateKey(todayKey())}. Create a budget for
-        today to start recording expenses against it.
-      </p>
-      <Button onClick={onCreate} className="mt-5">
-        Add Budget Allotment
-      </Button>
-    </section>
-  );
-}
-
-/** Composes the tracker screen. */
+/**
+ * Composes the tracker screen.
+ *
+ * There is deliberately no single "Current Balance" here. Several allotments
+ * can be available at once, and adding their balances together would produce a
+ * figure the user cannot spend: ₱3,200 of food money and ₱8,000 of emergency
+ * money is not ₱11,200 of anything. Each allotment is reported on its own row,
+ * and selecting one opens its detail.
+ */
 export function Dashboard() {
-  const { hydrated, budgets, budgetSummaries, currentBudget, getBudgetSummary } =
-    useTracker();
+  const { hydrated, budgets, budgetSummaries, todaysBudgets } = useTracker();
 
   const [addExpenseOpen, setAddExpenseOpen] = useState(false);
   const [budgetFormOpen, setBudgetFormOpen] = useState(false);
   const [budgetSeedDate, setBudgetSeedDate] = useState<string | undefined>();
+  const [viewing, setViewing] = useState<Budget | null>(null);
 
   const openBudgetForm = (date?: string) => {
     setBudgetSeedDate(date);
@@ -103,22 +90,17 @@ export function Dashboard() {
     );
   }
 
-  const currentSummary = currentBudget ? getBudgetSummary(currentBudget.id) : null;
+  const availableIds = new Set(todaysBudgets.map((budget) => budget.id));
 
   return (
     <>
       <AppShell>
         {/* Bottom padding clears the floating action button. */}
         <div className="space-y-4 pb-32 sm:space-y-5">
-          {currentSummary ? (
-            <CurrentBudgetCard summary={currentSummary} />
-          ) : (
-            <NoBudgetToday onCreate={() => openBudgetForm()} />
-          )}
-
           <BudgetOverview
             summaries={budgetSummaries}
-            currentBudgetId={currentBudget?.id}
+            availableIds={availableIds}
+            onSelect={setViewing}
           />
 
           <ExpenseList
@@ -140,6 +122,12 @@ export function Dashboard() {
         open={budgetFormOpen}
         initialDate={budgetSeedDate}
         onClose={() => setBudgetFormOpen(false)}
+      />
+
+      <BudgetDetailModal
+        open={viewing !== null}
+        budget={viewing}
+        onClose={() => setViewing(null)}
       />
     </>
   );

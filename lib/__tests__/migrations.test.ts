@@ -105,3 +105,73 @@ describe("migrations", () => {
     await db.query(`DELETE FROM users WHERE id = $1`, ["rls-check"]);
   });
 });
+
+describe("003_optional_budget_period", () => {
+  it("is listed so a fresh database gets it", () => {
+    expect(MIGRATIONS).toContain("003_optional_budget_period.sql");
+  });
+
+  it("leaves the period columns nullable", async () => {
+    const { rows } = await db.query<{ column_name: string; is_nullable: string }>(
+      `SELECT column_name, is_nullable FROM information_schema.columns
+        WHERE table_name = 'budgets' AND column_name IN ('start_date', 'end_date')
+        ORDER BY column_name`,
+    );
+
+    expect(rows.map((row) => row.is_nullable)).toEqual(["YES", "YES"]);
+  });
+
+  it("still rejects a half-set period", async () => {
+    const { rows } = await db.query<{ id: string }>(
+      `INSERT INTO users (id, name, gender, email, password_hash)
+       VALUES ('u-period', 'T', 'prefer_not_to_say', 'period@example.com', 'x')
+       RETURNING id`,
+    );
+    const userId = rows[0].id;
+
+    await expect(
+      db.query(
+        `INSERT INTO budgets (id, user_id, name, amount_centavos, start_date, end_date)
+         VALUES ('b-half', $1, 'Half', 100, '2026-08-01', NULL)`,
+        [userId],
+      ),
+    ).rejects.toBeTruthy();
+
+    // Both null is fine — that is a general allotment.
+    await db.query(
+      `INSERT INTO budgets (id, user_id, name, amount_centavos, start_date, end_date)
+       VALUES ('b-general', $1, 'General', 100, NULL, NULL)`,
+      [userId],
+    );
+
+    const { rows: stored } = await db.query<{ start_date: string | null }>(
+      `SELECT start_date FROM budgets WHERE id = 'b-general'`,
+    );
+    expect(stored[0].start_date).toBeNull();
+  });
+
+  it("still enforces the date format and ordering on dated budgets", async () => {
+    const { rows } = await db.query<{ id: string }>(
+      `INSERT INTO users (id, name, gender, email, password_hash)
+       VALUES ('u-fmt', 'T', 'prefer_not_to_say', 'fmt@example.com', 'x')
+       RETURNING id`,
+    );
+    const userId = rows[0].id;
+
+    await expect(
+      db.query(
+        `INSERT INTO budgets (id, user_id, name, amount_centavos, start_date, end_date)
+         VALUES ('b-fmt', $1, 'Bad', 100, 'not-a-date', 'not-a-date')`,
+        [userId],
+      ),
+    ).rejects.toBeTruthy();
+
+    await expect(
+      db.query(
+        `INSERT INTO budgets (id, user_id, name, amount_centavos, start_date, end_date)
+         VALUES ('b-order', $1, 'Backwards', 100, '2026-08-05', '2026-08-01')`,
+        [userId],
+      ),
+    ).rejects.toBeTruthy();
+  });
+});

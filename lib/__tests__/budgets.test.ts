@@ -1,9 +1,15 @@
 import { describe, expect, it } from "vitest";
 
 import {
-  activeBudget,
+  budgetApplicability,
   budgetStatus,
   budgetsForDate,
+  budgetsForToday,
+  coversDate,
+  describeBudgetPeriod,
+  generalBudgets,
+  isGeneralBudget,
+  needsReassignment,
   calculateBudgetRemaining,
   expensesForBudget,
   expensesOutsidePeriod,
@@ -14,13 +20,14 @@ import {
   sortBudgetsByPeriod,
   summarizeBudget,
 } from "@/lib/budgets";
-import { budget, expense } from "./helpers";
+import { budget, expense, generalBudget } from "./helpers";
 
 const NOW = new Date(2026, 7, 6, 12, 0); // 6 August 2026
 
 const week1 = budget("b1", "August Week 1", 5_000, "2026-08-01", "2026-08-05");
 const daily = budget("b2", "Daily Budget", 1_000, "2026-08-06");
 const weekend = budget("b3", "Weekend Budget", 3_000, "2026-08-07", "2026-08-09");
+const emergency = generalBudget("b4", "Emergency Fund", 10_000);
 
 const expenses = [
   expense("e1", "b1", "Food", 500, "2026-08-01"),
@@ -154,6 +161,28 @@ describe("budgetsForDate / resolveBudgetForDate", () => {
     expect(budgetsForDate(budgets, "2026-08-20")).toEqual([]);
   });
 
+  it("offers a general allotment alongside the dated one, dated first", () => {
+    const options = budgetsForDate([week1, emergency], "2026-08-03");
+    expect(options.map((b) => b.id)).toEqual(["b1", "b4"]);
+    // Two eligible allotments means the user must choose.
+    expect(resolveBudgetForDate([week1, emergency], "2026-08-03")).toBeNull();
+  });
+
+  it("offers a general allotment for a date no dated budget covers", () => {
+    expect(budgetsForDate([week1, emergency], "2026-09-30").map((b) => b.id)).toEqual(
+      ["b4"],
+    );
+    // One eligible allotment: no ambiguity to resolve.
+    expect(resolveBudgetForDate([week1, emergency], "2026-09-30")?.id).toBe("b4");
+  });
+
+  it("never offers a budget covering an unrelated date", () => {
+    const vacation = budget("v", "Vacation", 9_000, "2026-08-20", "2026-08-25");
+    expect(
+      budgetsForDate([week1, vacation, emergency], "2026-08-03").map((b) => b.id),
+    ).not.toContain("v");
+  });
+
   it("refuses to choose when several budgets cover the date", () => {
     const overlapping = [
       budget("a", "A", 5_000, "2026-08-01", "2026-08-10"),
@@ -164,13 +193,110 @@ describe("budgetsForDate / resolveBudgetForDate", () => {
   });
 });
 
-describe("activeBudget", () => {
-  it("returns the budget covering today", () => {
-    expect(activeBudget([week1, daily, weekend], NOW)?.id).toBe("b2");
+describe("budgetsForToday", () => {
+  it("returns the allotments that can fund an expense dated today", () => {
+    expect(budgetsForToday([week1, daily, weekend], NOW).map((b) => b.id)).toEqual([
+      "b2",
+    ]);
   });
 
-  it("returns null when nothing covers today", () => {
-    expect(activeBudget([week1, weekend], NOW)).toBeNull();
+  it("always includes a general allotment", () => {
+    expect(
+      budgetsForToday([week1, weekend, emergency], NOW).map((b) => b.id),
+    ).toEqual(["b4"]);
+  });
+
+  it("is empty when nothing applies", () => {
+    expect(budgetsForToday([week1, weekend], NOW)).toEqual([]);
+  });
+});
+
+describe("general allotments", () => {
+  it("recognises two nulls as no date restriction", () => {
+    expect(isGeneralBudget(emergency)).toBe(true);
+    expect(isGeneralBudget(week1)).toBe(false);
+  });
+
+  it("classifies each shape of allotment", () => {
+    expect(budgetApplicability(emergency)).toBe("general");
+    expect(budgetApplicability(daily)).toBe("single");
+    expect(budgetApplicability(week1)).toBe("range");
+  });
+
+  it("covers every date, however far from the others", () => {
+    for (const date of ["2026-08-03", "2026-08-10", "2026-08-19", "2027-09-01"]) {
+      expect(coversDate(emergency, date)).toBe(true);
+    }
+  });
+
+  it("still restricts a dated allotment", () => {
+    expect(coversDate(week1, "2026-08-03")).toBe(true);
+    expect(coversDate(week1, "2026-08-06")).toBe(false);
+  });
+
+  it("never becomes completed as the calendar moves", () => {
+    const distantFuture = new Date(2099, 0, 1);
+    expect(isCompleted(emergency, distantFuture)).toBe(false);
+    expect(budgetStatus(emergency, [], distantFuture)).toBe("unrestricted");
+  });
+
+  it("still reports overspending", () => {
+    const over = [expense("o", "b4", "Hospital", 12_000, "2026-08-19")];
+    expect(budgetStatus(emergency, over, NOW)).toBe("over-budget");
+  });
+
+  it("has no duration to report", () => {
+    expect(summarizeBudget(emergency, [], NOW).durationDays).toBeNull();
+    expect(summarizeBudget(emergency, [], NOW).applicability).toBe("general");
+  });
+
+  it("labels the missing period rather than leaving it blank", () => {
+    expect(describeBudgetPeriod(emergency)).toBe("No Date Restriction");
+    expect(describeBudgetPeriod(daily)).not.toBe("");
+  });
+
+  it("can be listed on its own", () => {
+    expect(generalBudgets([week1, daily, emergency]).map((b) => b.id)).toEqual([
+      "b4",
+    ]);
+  });
+
+  it("keeps its own balance, untouched by other allotments", () => {
+    const mixed = [
+      ...expenses,
+      expense("g1", "b4", "Medicine", 1_000, "2026-08-19"),
+    ];
+    expect(calculateBudgetRemaining(emergency, mixed)).toBe(9_000);
+    expect(calculateBudgetRemaining(week1, mixed)).toBe(3_200);
+  });
+
+  it("strands nothing when a dated budget becomes general", () => {
+    const own = [expense("x", "b1", "Food", 100, "2026-08-01")];
+    expect(
+      expensesOutsidePeriod(week1, own, { startDate: null, endDate: null }),
+    ).toEqual([]);
+  });
+
+  it("is not reported as an overlap, since it applies to every day", () => {
+    expect(findOverlaps([emergency], "2026-08-01", "2026-08-05")).toEqual([]);
+  });
+});
+
+describe("needsReassignment", () => {
+  it("is true when the chosen budget cannot fund the new date", () => {
+    expect(needsReassignment(week1, "2026-08-20")).toBe(true);
+  });
+
+  it("is false while the budget still covers the date", () => {
+    expect(needsReassignment(week1, "2026-08-03")).toBe(false);
+  });
+
+  it("is never true for a general allotment", () => {
+    expect(needsReassignment(emergency, "2027-01-01")).toBe(false);
+  });
+
+  it("is false when nothing is selected yet", () => {
+    expect(needsReassignment(null, "2026-08-03")).toBe(false);
   });
 });
 

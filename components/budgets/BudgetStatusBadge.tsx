@@ -9,6 +9,8 @@ const TONES: Record<BudgetStatus, string> = {
   upcoming: "bg-surface-muted text-muted-strong ring-1 ring-inset ring-border-subtle",
   completed: "bg-surface-muted text-muted ring-1 ring-inset ring-border-subtle",
   "over-budget": "bg-danger-soft text-danger",
+  unrestricted:
+    "bg-surface-muted text-muted-strong ring-1 ring-inset ring-border-subtle",
 };
 
 /** Compact status pill shared by every budget surface. */
