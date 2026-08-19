@@ -84,6 +84,13 @@ export function ExpenseFormModal({
    * user is asked, rather than the form quietly keeping a pot they never picked.
    */
   const [chosenByUser, setChosenByUser] = useState(false);
+  /**
+   * True from the moment the form is submitted until the server answers.
+   *
+   * It both disables the button and short-circuits the handler, so a rapid
+   * double-tap on a phone cannot record the same expense twice.
+   */
+  const [submitting, setSubmitting] = useState(false);
   const nameRef = useRef<HTMLInputElement>(null);
 
   useEffect(() => {
@@ -98,6 +105,7 @@ export function ExpenseFormModal({
     setChosenByUser(expense !== null);
     setErrors({});
     setDisplaced(false);
+    setSubmitting(false);
   }, [open, expense, today]);
 
   // Budgets that may fund this date: those whose period covers it, plus every
@@ -140,18 +148,18 @@ export function ExpenseFormModal({
 
   const availableBalance = useMemo(() => {
     if (!open || !selectedBudget) return 0;
-    return availableBalanceFor(selectedBudget.id, expense?.id);
-  }, [open, selectedBudget, availableBalanceFor, expense?.id]);
+    return availableBalanceFor(selectedBudget.id, expense);
+  }, [open, selectedBudget, availableBalanceFor, expense]);
 
   /** Balances for the option labels, so the user can choose with the figures. */
   const balances = useMemo(() => {
     const map = new Map<string, number>();
     if (!open) return map;
     for (const budget of eligible) {
-      map.set(budget.id, availableBalanceFor(budget.id, expense?.id));
+      map.set(budget.id, availableBalanceFor(budget.id, expense));
     }
     return map;
-  }, [open, eligible, availableBalanceFor, expense?.id]);
+  }, [open, eligible, availableBalanceFor, expense]);
 
   const parsedAmount = parseAmount(amount);
   const exceedsBalance =
@@ -163,8 +171,9 @@ export function ExpenseFormModal({
   const noBudget = eligible.length === 0;
   const mustChoose = eligible.length > 1;
 
-  const handleSubmit = (event: React.FormEvent) => {
+  const handleSubmit = async (event: React.FormEvent) => {
     event.preventDefault();
+    if (submitting) return;
 
     const result = validateExpenseForm(name, amount, expenseDate, budgetId, {
       eligibleBudgets: eligible,
@@ -178,15 +187,26 @@ export function ExpenseFormModal({
     }
 
     const values = result.values!;
+    setSubmitting(true);
 
-    if (isEditing && expense) {
-      updateExpense(expense.id, values);
-      showToast("Expense updated", "positive");
-    } else {
-      addExpense(values);
-      showToast(`${values.name} · ${formatCurrency(values.amount)} added`, "positive");
+    // Only announce success once the server has actually accepted it, and only
+    // close then: a refusal leaves the form open with the values intact.
+    const saved =
+      isEditing && expense
+        ? await updateExpense(expense.id, values)
+        : await addExpense(values);
+
+    if (!saved) {
+      setSubmitting(false);
+      return;
     }
 
+    showToast(
+      isEditing
+        ? "Expense updated"
+        : `${values.name} · ${formatCurrency(values.amount)} added`,
+      "positive",
+    );
     onClose();
   };
 
@@ -204,16 +224,28 @@ export function ExpenseFormModal({
       }
       footer={
         <>
-          <Button variant="secondary" className="flex-1" onClick={onClose}>
+          <Button
+            variant="secondary"
+            className="flex-1"
+            onClick={onClose}
+            disabled={submitting}
+          >
             Cancel
           </Button>
           <Button
             type="submit"
             form={FORM_ID}
             className="flex-1"
-            disabled={exceedsBalance || noBudget}
+            disabled={exceedsBalance || noBudget || submitting}
+            aria-busy={submitting}
           >
-            {isEditing ? "Save changes" : "Add Expense"}
+            {submitting
+              ? isEditing
+                ? "Saving…"
+                : "Adding Expense…"
+              : isEditing
+                ? "Save changes"
+                : "Add Expense"}
           </Button>
         </>
       }

@@ -55,7 +55,7 @@ export function BudgetCard({
       : "bg-positive";
 
   return (
-    <article className="flex flex-col rounded-2xl border border-border-subtle bg-surface p-4 shadow-card transition-shadow duration-200 hover:shadow-raised sm:p-5">
+    <article className="flex animate-rise-in flex-col rounded-2xl border border-border-subtle bg-surface p-4 shadow-card transition-shadow duration-200 hover:shadow-raised sm:p-5">
       <div className="flex items-start justify-between gap-3">
         <div className="min-w-0">
           <h3 className="truncate text-[0.9375rem] font-semibold tracking-tight text-foreground">

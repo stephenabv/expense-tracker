@@ -15,7 +15,14 @@ import { revalidatePath } from "next/cache";
 import type { Budget, BudgetInput } from "@/types/budget";
 import type { Expense, ExpenseInput } from "@/types/expense";
 import { getUserId } from "@/lib/server/session";
+import type { Page } from "@/lib/pagination";
 import {
+  budgetTotals,
+  budgetTotalsBefore,
+  listExpensesMatching,
+  listExpensesPage,
+  type BudgetTotal,
+  type ExpenseQuery,
   deleteBudgetRow,
   deleteExpenseRow,
   insertBudget,
@@ -27,7 +34,12 @@ import {
   updateExpenseRow,
 } from "@/lib/db/tracker";
 import { validateBudgetForm, validateExpenseForm } from "@/lib/validation";
-import { budgetApplicability, budgetsForDate, isCompleted } from "@/lib/budgets";
+import {
+  budgetApplicability,
+  budgetsForDate,
+  expensesOutsidePeriod,
+  isCompleted,
+} from "@/lib/budgets";
 import { isDatabaseConfigured } from "@/lib/db/client";
 
 export type ActionResult<T> =
@@ -54,6 +66,66 @@ export async function loadTrackerAction(): Promise<
   if (!userId) return UNAUTHENTICATED;
 
   return { ok: true, data: await loadTrackerData(userId) };
+}
+
+/**
+ * One page of the caller's expenses.
+ *
+ * The query is scoped to the session's user before anything else is applied, so
+ * a page, a sort or a budget filter can only ever move within that account's
+ * own rows.
+ */
+export async function listExpensesAction(
+  query: ExpenseQuery = {},
+): Promise<ActionResult<Page<Expense>>> {
+  if (!isDatabaseConfigured()) return NOT_CONFIGURED;
+  const userId = await getUserId();
+  if (!userId) return UNAUTHENTICATED;
+
+  return { ok: true, data: await listExpensesPage(userId, query) };
+}
+
+/** Per-budget totals, so balances survive the expense list being paginated. */
+export async function budgetTotalsAction(): Promise<ActionResult<BudgetTotal[]>> {
+  if (!isDatabaseConfigured()) return NOT_CONFIGURED;
+  const userId = await getUserId();
+  if (!userId) return UNAUTHENTICATED;
+
+  return { ok: true, data: await budgetTotals(userId) };
+}
+
+/**
+ * Everything history needs for one filter.
+ *
+ * The expenses inside the window, plus what each budget had already spent
+ * before it. History and its export both read the whole of what the filter
+ * selected rather than a page — the filter is the bound — and the opening
+ * figures keep each budget's running balance true without shipping the rows
+ * that came before.
+ */
+export async function loadHistoryAction(
+  query: Omit<ExpenseQuery, "page" | "pageSize"> = {},
+): Promise<
+  ActionResult<{ expenses: Expense[]; spentBefore: Array<[string, number]> }>
+> {
+  if (!isDatabaseConfigured()) return NOT_CONFIGURED;
+  const userId = await getUserId();
+  if (!userId) return UNAUTHENTICATED;
+
+  const [expenses, before] = await Promise.all([
+    listExpensesMatching(userId, query),
+    query.from
+      ? budgetTotalsBefore(userId, query.from)
+      : Promise.resolve([]),
+  ]);
+
+  return {
+    ok: true,
+    data: {
+      expenses,
+      spentBefore: before.map((entry) => [entry.budgetId, entry.totalExpenses]),
+    },
+  };
 }
 
 /* ----------------------------------------------------------------- budgets */
@@ -116,6 +188,25 @@ export async function updateBudgetAction(
     return {
       ok: false,
       error: result.errors.name ?? result.errors.amount ?? result.errors.period!,
+    };
+  }
+
+  /*
+   * Narrowing a period must not strand the expenses charged to it.
+   *
+   * Checked here rather than only in the form: the browser's copy of the
+   * expenses is a page, not the whole set, and the rule has to hold whatever
+   * the client happened to have loaded.
+   */
+  const own = await listExpensesMatching(userId, { budgetId });
+  const stranded = expensesOutsidePeriod(target, own, result.values!);
+  if (stranded.length > 0) {
+    return {
+      ok: false,
+      error:
+        stranded.length === 1
+          ? "1 recorded expense falls outside the new period."
+          : `${stranded.length} recorded expenses fall outside the new period.`,
     };
   }
 

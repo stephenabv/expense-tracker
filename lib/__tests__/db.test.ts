@@ -17,6 +17,9 @@ import {
   storeToken,
 } from "@/lib/db/tokens";
 import {
+  budgetTotals,
+  budgetTotalsBefore,
+  listExpensesPage,
   deleteBudgetRow,
   insertBudget,
   insertExpense,
@@ -28,6 +31,7 @@ import {
   deleteExpenseRow,
 } from "@/lib/db/tracker";
 import { createToken, hashToken } from "@/lib/auth/tokens";
+import { normalizeEmail } from "@/lib/auth/schemas";
 
 let db: TestDatabase;
 
@@ -511,5 +515,272 @@ describe("moving an expense between allotments", () => {
     expect(data.budgets).toHaveLength(2);
     expect(data.expenses).toHaveLength(1);
     expect(data.expenses[0].budgetId).toBe(fund.id);
+  });
+});
+
+describe("email uniqueness", () => {
+  const base = {
+    name: "Test User",
+    gender: "prefer_not_to_say" as const,
+    passwordHash: "hash-placeholder",
+  };
+
+  it("accepts a new address", async () => {
+    const user = await createUser({ ...base, email: "new@example.com" });
+    expect(user.email).toBe("new@example.com");
+  });
+
+  it("rejects the same address twice", async () => {
+    await createUser({ ...base, email: "taken@example.com" });
+    await expect(
+      createUser({ ...base, email: "taken@example.com" }),
+    ).rejects.toBeInstanceOf(EmailAlreadyRegisteredError);
+  });
+
+  it("rejects a differently-cased duplicate once normalized", async () => {
+    // Callers normalize before reaching the database; the stored value is
+    // always lowercase, so the unique index is what makes the comparison
+    // case-insensitive.
+    const first = normalizeEmail("  JOHN.DOE@Example.COM ");
+    const second = normalizeEmail("john.doe@example.com");
+    expect(first).toBe(second);
+
+    await createUser({ ...base, email: first });
+    await expect(
+      createUser({ ...base, email: second }),
+    ).rejects.toBeInstanceOf(EmailAlreadyRegisteredError);
+  });
+
+  it("finds an account whatever casing the lookup uses", async () => {
+    await createUser({ ...base, email: normalizeEmail("Mixed.Case@Example.com") });
+    const found = await findUserByEmail(normalizeEmail("MIXED.CASE@EXAMPLE.COM"));
+    expect(found?.email).toBe("mixed.case@example.com");
+  });
+
+  it("does not treat dots or plus-addressing as the same account", async () => {
+    // Deliberate: those are provider-specific conventions, and collapsing them
+    // would merge addresses that some hosts genuinely treat as distinct.
+    await createUser({ ...base, email: "john.doe@example.com" });
+    const plus = await createUser({ ...base, email: "john.doe+budget@example.com" });
+    expect(plus.email).toBe("john.doe+budget@example.com");
+  });
+
+  it("lets the database settle concurrent registrations of one address", async () => {
+    /*
+     * The important case. An application-level "does it exist?" check cannot
+     * prevent this: both requests can pass the SELECT before either INSERTs.
+     * The unique index is the only thing that decides, so exactly one of these
+     * must win and the rest must fail as duplicates.
+     */
+    const attempts = await Promise.allSettled(
+      Array.from({ length: 5 }, () =>
+        createUser({ ...base, email: "race@example.com" }),
+      ),
+    );
+
+    const created = attempts.filter((a) => a.status === "fulfilled");
+    const refused = attempts.filter(
+      (a) =>
+        a.status === "rejected" &&
+        a.reason instanceof EmailAlreadyRegisteredError,
+    );
+
+    expect(created).toHaveLength(1);
+    expect(refused).toHaveLength(4);
+
+    const { rows } = await db.query<{ count: string }>(
+      `SELECT count(*)::text AS count FROM users WHERE email = 'race@example.com'`,
+    );
+    expect(rows[0].count).toBe("1");
+  });
+});
+
+describe("paged expenses", () => {
+  async function seed(count: number) {
+    const user = await makeUser();
+    const budget = await insertBudget(user.id, {
+      name: "August",
+      amount: 100_000,
+      startDate: null,
+      endDate: null,
+    });
+    const other = await insertBudget(user.id, {
+      name: "Other",
+      amount: 100_000,
+      startDate: null,
+      endDate: null,
+    });
+
+    for (let index = 0; index < count; index += 1) {
+      const day = String((index % 28) + 1).padStart(2, "0");
+      await insertExpense(user.id, {
+        budgetId: index % 5 === 0 ? other.id : budget.id,
+        name: `Expense ${index + 1}`,
+        amount: index + 1,
+        expenseDate: `2026-08-${day}`,
+      });
+    }
+
+    return { user, budget, other };
+  }
+
+  it("returns one page and the numbers describing it", async () => {
+    const { user } = await seed(45);
+    const page = await listExpensesPage(user.id, { page: 2, pageSize: 20 });
+
+    expect(page.data).toHaveLength(20);
+    expect(page.pagination).toMatchObject({
+      page: 2,
+      pageSize: 20,
+      totalItems: 45,
+      totalPages: 3,
+      firstItem: 21,
+      lastItem: 40,
+    });
+  });
+
+  it("returns a short final page", async () => {
+    const { user } = await seed(45);
+    const page = await listExpensesPage(user.id, { page: 3, pageSize: 20 });
+    expect(page.data).toHaveLength(5);
+    expect(page.pagination.hasNext).toBe(false);
+  });
+
+  it("pulls a page beyond the end back into range", async () => {
+    const { user } = await seed(10);
+    const page = await listExpensesPage(user.id, { page: 9, pageSize: 20 });
+    expect(page.pagination.page).toBe(1);
+    expect(page.data).toHaveLength(10);
+  });
+
+  it("caps an absurd page size instead of reading the table", async () => {
+    const { user } = await seed(5);
+    const page = await listExpensesPage(user.id, { pageSize: 100_000 });
+    expect(page.pagination.pageSize).toBe(100);
+  });
+
+  it("sorts across the whole set, not within a page", async () => {
+    const { user } = await seed(45);
+    // Amounts are 1..45, so the very largest must lead page 1 under "highest".
+    const highest = await listExpensesPage(user.id, { sort: "highest", pageSize: 5 });
+    expect(highest.data.map((e) => e.amount)).toEqual([45, 44, 43, 42, 41]);
+
+    const lowest = await listExpensesPage(user.id, { sort: "lowest", pageSize: 5 });
+    expect(lowest.data.map((e) => e.amount)).toEqual([1, 2, 3, 4, 5]);
+  });
+
+  it("pages a sort without repeating or dropping a row", async () => {
+    const { user } = await seed(45);
+    const seen = new Set<string>();
+
+    for (let page = 1; page <= 3; page += 1) {
+      const result = await listExpensesPage(user.id, {
+        page,
+        pageSize: 20,
+        sort: "newest",
+      });
+      for (const expense of result.data) seen.add(expense.id);
+    }
+
+    expect(seen.size).toBe(45);
+  });
+
+  it("filters by budget and re-counts for that filter", async () => {
+    const { user, other } = await seed(45);
+    const page = await listExpensesPage(user.id, { budgetId: other.id, pageSize: 50 });
+
+    expect(page.data.every((e) => e.budgetId === other.id)).toBe(true);
+    expect(page.pagination.totalItems).toBe(9);
+    expect(page.pagination.totalPages).toBe(1);
+  });
+
+  it("filters by date range", async () => {
+    const { user } = await seed(45);
+    const page = await listExpensesPage(user.id, {
+      from: "2026-08-01",
+      to: "2026-08-03",
+      pageSize: 100,
+    });
+
+    expect(page.data.every((e) => e.expenseDate <= "2026-08-03")).toBe(true);
+    expect(page.pagination.totalItems).toBe(page.data.length);
+  });
+
+  it("never returns another account's expenses", async () => {
+    const { user } = await seed(10);
+    const stranger = await makeUser("stranger@example.com");
+
+    const mine = await listExpensesPage(user.id, { pageSize: 100 });
+    const theirs = await listExpensesPage(stranger.id, { pageSize: 100 });
+
+    expect(mine.pagination.totalItems).toBe(10);
+    expect(theirs.pagination.totalItems).toBe(0);
+    expect(theirs.data).toEqual([]);
+  });
+});
+
+describe("budget aggregates", () => {
+  it("sums each budget's spend in the database", async () => {
+    const user = await makeUser();
+    const a = await insertBudget(user.id, {
+      name: "A",
+      amount: 5_000,
+      startDate: null,
+      endDate: null,
+    });
+    const b = await insertBudget(user.id, {
+      name: "B",
+      amount: 5_000,
+      startDate: null,
+      endDate: null,
+    });
+
+    for (const [budgetId, amount, date] of [
+      [a.id, 500, "2026-08-01"],
+      [a.id, 250.5, "2026-08-02"],
+      [b.id, 1_000, "2026-08-02"],
+    ] as const) {
+      await insertExpense(user.id, { budgetId, name: "x", amount, expenseDate: date });
+    }
+
+    const totals = await budgetTotals(user.id);
+    const forA = totals.find((t) => t.budgetId === a.id)!;
+    const forB = totals.find((t) => t.budgetId === b.id)!;
+
+    expect(forA.totalExpenses).toBe(750.5);
+    expect(forA.expenseCount).toBe(2);
+    expect(forB.totalExpenses).toBe(1_000);
+  });
+
+  it("reports only what was spent before a date", async () => {
+    const user = await makeUser();
+    const budget = await insertBudget(user.id, {
+      name: "A",
+      amount: 5_000,
+      startDate: null,
+      endDate: null,
+    });
+
+    for (const [amount, date] of [
+      [100, "2026-07-30"],
+      [200, "2026-07-31"],
+      [400, "2026-08-01"],
+    ] as const) {
+      await insertExpense(user.id, {
+        budgetId: budget.id,
+        name: "x",
+        amount,
+        expenseDate: date,
+      });
+    }
+
+    // Strictly before, so August's own spending is excluded.
+    const before = await budgetTotalsBefore(user.id, "2026-08-01");
+    expect(before.find((t) => t.budgetId === budget.id)?.totalExpenses).toBe(300);
+  });
+
+  it("counts nothing for an account with no expenses", async () => {
+    const user = await makeUser();
+    expect(await budgetTotals(user.id)).toEqual([]);
   });
 });

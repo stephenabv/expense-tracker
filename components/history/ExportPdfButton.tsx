@@ -100,7 +100,7 @@ export function ExportPdfButton({
         }
       >
         {busy ? <Spinner /> : <DownloadIcon />}
-        {busy ? "Generating…" : "Export PDF"}
+        {busy ? "Generating PDF…" : "Export PDF"}
       </Button>
 
       {disabled ? (

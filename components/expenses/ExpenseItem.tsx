@@ -63,7 +63,7 @@ export function ExpenseItem({
   const dateLabel = formatShortDateKey(expense.expenseDate);
 
   return (
-    <li className="group flex items-center gap-3 px-4 py-3.5 transition-colors duration-150 hover:bg-surface-muted sm:gap-4 sm:px-5">
+    <li className="group flex animate-rise-in items-center gap-3 px-4 py-3.5 transition-colors duration-150 hover:bg-surface-muted sm:gap-4 sm:px-5">
       <span
         aria-hidden="true"
         className="flex h-9 w-9 shrink-0 items-center justify-center rounded-full bg-surface-muted text-sm font-semibold text-muted-strong ring-1 ring-inset ring-border-subtle"

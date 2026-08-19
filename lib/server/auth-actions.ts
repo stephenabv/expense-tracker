@@ -78,11 +78,21 @@ export async function signUpAction(
   const result = await registerUser(parsed.data);
 
   if (!result.ok) {
-    // The person typed this address themselves, so naming the clash is not an
-    // enumeration leak — and any other wording would just confuse them.
+    /*
+     * Registration is the one flow that may name the clash.
+     *
+     * The person typed this address themselves and needs to know why the form
+     * refused; any vaguer wording would just strand them. Login, forgot-password
+     * and resend-verification stay deliberately silent about whether an account
+     * exists — see their generic messages — so this does not become a way to
+     * probe for addresses through those endpoints.
+     */
     return {
       ok: false,
-      errors: { email: "That email address is already registered." },
+      errors: {
+        email:
+          "An account with this email already exists. Try logging in instead, or use Forgot password if you no longer have it.",
+      },
     };
   }
 

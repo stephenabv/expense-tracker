@@ -16,12 +16,10 @@ import {
   NO_DATE_PERIOD_LABEL,
   budgetApplicability,
   describeBudgetPeriodLong,
-  expensesOutsidePeriod,
   findOverlaps,
 } from "@/lib/budgets";
 import {
   MAX_BUDGET_NAME_LENGTH,
-  describeStrandedExpenses,
   validateBudgetForm,
   type BudgetFormErrors,
 } from "@/lib/validation";
@@ -69,7 +67,7 @@ export function BudgetFormModal({
   budget = null,
   initialDate,
 }: BudgetFormModalProps) {
-  const { budgets, expensesFor, createBudget, updateBudget } = useTracker();
+  const { budgets, getBudgetSummary, createBudget, updateBudget } = useTracker();
   const { showToast } = useToast();
 
   const isEditing = budget !== null;
@@ -82,6 +80,8 @@ export function BudgetFormModal({
   const [endDate, setEndDate] = useState(today);
   const [errors, setErrors] = useState<BudgetFormErrors>({});
   const [pendingConfirm, setPendingConfirm] = useState<PendingValues | null>(null);
+  /** Blocks a second submit while the first is still with the server. */
+  const [submitting, setSubmitting] = useState(false);
 
   const nameRef = useRef<HTMLInputElement>(null);
 
@@ -108,26 +108,25 @@ export function BudgetFormModal({
     }
     setErrors({});
     setPendingConfirm(null);
+    setSubmitting(false);
   }, [open, budget, initialDate, today]);
 
   // A single-day budget is a period whose ends match — the user never types the
   // same date twice — and a general one has no period at all.
-  const effectiveStart = mode === "general" ? null : startDate;
   const effectiveEnd =
     mode === "general" ? null : mode === "single" ? startDate : endDate;
 
-  const recordedExpenses = useMemo(
-    () => (budget ? expensesFor(budget.id) : []),
-    [budget, expensesFor],
+  /*
+   * How many expenses this allotment already carries.
+   *
+   * Read from the budget's aggregate rather than by counting rows: the client
+   * holds only a page of expenses now, so a count taken from that would be
+   * wrong for any account with more than one page.
+   */
+  const recordedCount = useMemo(
+    () => (budget ? (getBudgetSummary(budget.id)?.expenseCount ?? 0) : 0),
+    [budget, getBudgetSummary],
   );
-
-  const stranded = useMemo(() => {
-    if (!budget) return [];
-    return expensesOutsidePeriod(budget, recordedExpenses, {
-      startDate: effectiveStart,
-      endDate: effectiveEnd,
-    });
-  }, [budget, recordedExpenses, effectiveStart, effectiveEnd]);
 
   const overlaps = useMemo(
     () =>
@@ -137,34 +136,39 @@ export function BudgetFormModal({
     [mode, budgets, startDate, effectiveEnd, budget?.id],
   );
 
-  const commit = (values: PendingValues) => {
-    if (isEditing && budget) {
-      updateBudget(budget.id, values);
-      showToast(`${values.name} updated and locked`, "positive");
-    } else {
-      createBudget(values);
-      showToast(`${values.name} created`, "positive");
+  const commit = async (values: PendingValues) => {
+    if (submitting) return;
+    setSubmitting(true);
+
+    const saved =
+      isEditing && budget
+        ? await updateBudget(budget.id, values)
+        : await createBudget(values);
+
+    if (!saved) {
+      // The server refused; keep the form open with the values still typed.
+      setSubmitting(false);
+      setPendingConfirm(null);
+      return;
     }
+
+    showToast(
+      isEditing ? `${values.name} updated and locked` : `${values.name} created`,
+      "positive",
+    );
     setPendingConfirm(null);
     onClose();
   };
 
   const handleSubmit = (event: React.FormEvent) => {
     event.preventDefault();
+    if (submitting) return;
 
     const result = validateBudgetForm(name, amount, mode, startDate, endDate);
 
     if (!result.ok) {
       setErrors(result.errors);
       if (result.errors.name) nameRef.current?.focus();
-      return;
-    }
-
-    // Narrowing a period must not strand expenses outside the budget paying for
-    // them — that would leave an expense charged to an allotment that no longer
-    // applies to its date.
-    if (stranded.length > 0) {
-      setErrors({ period: describeStrandedExpenses(stranded) });
       return;
     }
 
@@ -179,12 +183,12 @@ export function BudgetFormModal({
         budget.startDate !== values.startDate ||
         budget.endDate !== values.endDate);
 
-    if (termsChanged && recordedExpenses.length > 0) {
+    if (termsChanged && recordedCount > 0) {
       setPendingConfirm(values);
       return;
     }
 
-    commit(values);
+    void commit(values);
   };
 
   const parsedAmount = Number(amount.replace(/[₱,\s]/g, ""));
@@ -210,11 +214,28 @@ export function BudgetFormModal({
         }
         footer={
           <>
-            <Button variant="secondary" className="flex-1" onClick={onClose}>
+            <Button
+              variant="secondary"
+              className="flex-1"
+              onClick={onClose}
+              disabled={submitting}
+            >
               Cancel
             </Button>
-            <Button type="submit" form={FORM_ID} className="flex-1">
-              {isEditing ? "Save changes" : "Create Budget"}
+            <Button
+              type="submit"
+              form={FORM_ID}
+              className="flex-1"
+              disabled={submitting}
+              aria-busy={submitting}
+            >
+              {submitting
+                ? isEditing
+                  ? "Saving…"
+                  : "Creating Budget…"
+                : isEditing
+                  ? "Save changes"
+                  : "Create Budget"}
             </Button>
           </>
         }
@@ -375,14 +396,14 @@ export function BudgetFormModal({
         confirmLabel="Save changes"
         cancelLabel="Go back"
         onCancel={() => setPendingConfirm(null)}
-        onConfirm={() => pendingConfirm && commit(pendingConfirm)}
+        onConfirm={() => pendingConfirm && void commit(pendingConfirm)}
       >
         {pendingConfirm && budget ? (
           <dl className="space-y-2 text-sm">
             <div className="flex items-center justify-between gap-4">
               <dt className="text-muted">Recorded expenses</dt>
               <dd className="font-medium tabular text-foreground">
-                {recordedExpenses.length}
+                {recordedCount}
               </dd>
             </div>
             <div className="flex items-center justify-between gap-4">

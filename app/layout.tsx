@@ -1,6 +1,7 @@
 import type { Metadata, Viewport } from "next";
 
 import { ToastProvider } from "@/components/ui/Toast";
+import { Footer } from "@/components/layout/Footer";
 import "./globals.css";
 
 export const metadata: Metadata = {
@@ -33,7 +34,21 @@ export default function RootLayout({
       <body className="min-h-dvh antialiased">
         {/* Tracker data is loaded per page, scoped to the signed-in user, so
             the provider lives with those routes rather than here. */}
-        <ToastProvider>{children}</ToastProvider>
+        <ToastProvider>
+          {children}
+
+          {/*
+            * The footer lives here rather than in the page shells.
+            *
+            * A route's loading skeleton and its page can be mounted at the same
+            * moment while Next streams, so anything a shell renders can appear
+            * twice. Rendering it once per document keeps a single `contentinfo`
+            * landmark whatever is happening above it.
+            */}
+          <div className="mx-auto w-full max-w-3xl px-4 sm:px-6">
+            <Footer />
+          </div>
+        </ToastProvider>
       </body>
     </html>
   );

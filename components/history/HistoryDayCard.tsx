@@ -68,7 +68,7 @@ export function HistoryDayCard({ day, defaultOpen = false }: HistoryDayCardProps
       </h3>
 
       {open ? (
-        <div id={panelId} className="border-t border-border-subtle">
+        <div id={panelId} className="animate-rise-in border-t border-border-subtle">
           <ul className="divide-y divide-border-subtle">
             {day.expenses.map((expense) => (
               <li key={expense.id} className="flex items-center gap-3 px-4 py-3 sm:px-5">
