@@ -56,10 +56,26 @@ expense records on each render, so the screen cannot drift from the data.
 - **Safe reassignment** — changing an expense's date re-derives the options and
   drops a budget that no longer applies. Moving an expense between allotments is
   a single write, so it can neither be deducted twice nor fall out of both.
-- **Statuses** — Active, Upcoming, Completed, Over budget, and No Date
-  Restriction, derived from the applicability and the spending.
+- **Fully spent budgets close themselves** — the moment an allotment's balance
+  reaches exactly ₱0.00 it becomes **Fully Spent**: locked, moved to a
+  **Completed Budgets** section, and gone from every selector, dashboard
+  available-funds list and expense-assignment option. It and its expenses become
+  a permanent record — no edit, no delete, no reassignment, and no unlock. ₱1
+  left is still an open budget; only exact zero closes one.
+- **The close is atomic and race-safe** — validate, insert, recalculate and lock
+  happen in one transaction holding the budget's row lock, so two expenses
+  submitted at the same instant against ₱500 remaining cannot both succeed, and
+  a failure anywhere rolls the whole thing back.
+- **Enforced on the server, not by the screen** — the UI hides Edit, Delete and
+  Unlock for a closed budget, but the actions refuse the write on their own and
+  the SQL refuses it again. A request that skips the interface entirely gets
+  nowhere.
+- **Statuses** — Active, Upcoming, Period ended, Over budget, No Date
+  Restriction, and Fully Spent, derived from the applicability, the spending and
+  the stored lifecycle.
 - **Per-budget locking** — a new allotment is locked; unlocking and editing one
-  leaves every other untouched. Completed periods are immutable.
+  leaves every other untouched. Budgets whose period has ended are immutable,
+  and fully spent ones are immutable permanently.
 - **Expense management** — add, edit and delete expenses, each with a name,
   amount, date and budget. Deletions are confirmed first.
 - **Overspending protection** — an expense larger than *its own* budget's
@@ -68,8 +84,10 @@ expense records on each render, so the screen cannot drift from the data.
   and narrowable to one allotment. Days are grouped and labelled with the budget
   that paid for each.
 - **PDF export** — a real, paginated document with a per-budget summary that
-  names each allotment's own applicability, and a day-by-day breakdown grouped
-  by date and then by budget. It contains exactly what the filter selected.
+  names each allotment's own applicability and whether it is Active or Fully
+  Spent, and a day-by-day breakdown grouped by date and then by budget. Closed
+  budgets are reported, never dropped: leaving them out would understate what
+  was allocated and spent. It contains exactly what the filter selected.
 - **Persistence** — budgets and expenses live in PostgreSQL, scoped to the
   signed-in account, and every mutation is re-validated on the server.
 - **Paginated by the database** — the expense list is fetched one page at a
@@ -142,6 +160,10 @@ are not needed and the publishable/anon key plays no part.
 DATABASE_URL="postgresql://postgres.<project-ref>:<db-password>@aws-0-<region>.pooler.supabase.com:5432/postgres" \
   npm run db:migrate
 ```
+
+`npm run db:migrate` applies every `.sql` file in `db/migrations/` in filename
+order, so a new migration is picked up by adding the file — there is no list to
+keep in step. Every statement is idempotent, so re-running it is safe.
 
 **Why migration `002` exists.** Supabase serves every table in the `public`
 schema over HTTP through PostgREST, and grants its `anon` and `authenticated`
@@ -407,9 +429,12 @@ users                      (id, name, gender, email, password_hash,
 email_verification_tokens  (id, user_id, token_hash, expires_at, consumed_at)
 password_reset_tokens      (id, user_id, token_hash, expires_at, consumed_at)
 budgets                    (id, user_id, name, amount_centavos,
-                            start_date, end_date, locked, …)
+                            start_date, end_date, locked,
+                            status, completed_at, …)
                             -- start_date/end_date are NULL together for an
                             -- allotment with no date restriction
+                            -- status is 'active' or 'fully_spent'; the latter
+                            -- is permanent and pairs with completed_at
 expenses                   (id, user_id, budget_id, name, amount_centavos,
                             expense_date, …)
 ```
@@ -422,6 +447,12 @@ Two deliberate choices in the schema:
   constraint enforces `(start_date IS NULL) = (end_date IS NULL)`: a half-set
   period is not a period, and every read path would treat such a row as
   unrestricted — silently discarding the date the user set.
+- **A budget's completion is stored, not derived.** `amount − SUM(expenses) = 0`
+  is a fact about today's numbers; whether the budget was *closed* is a fact
+  about its lifecycle, and only the second one can be enforced in a WHERE
+  clause. Storing `status` also means a later edit cannot silently reopen a
+  settled record. A CHECK keeps `status = 'fully_spent'` and `completed_at`
+  in step, so "when was this closed?" always has an answer.
 - **Calendar dates are `YYYY-MM-DD` text**, not `DATE`. Budget periods and
   expense dates are calendar concepts in the user's timezone; a `DATE` column
   round-tripped through a driver invites an off-by-one-day bug, and zero-padded

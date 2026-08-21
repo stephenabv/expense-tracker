@@ -32,7 +32,8 @@ import type { Expense, ExpenseInput } from "@/types/expense";
 import {
   budgetsForDate,
   budgetsForToday,
-  isCompleted,
+  isFullySpent,
+  isPeriodEnded,
   sortBudgetsByPeriod,
   summarizeBudgetsFromTotals,
   type BudgetTotals,
@@ -52,6 +53,7 @@ import {
   createExpenseAction,
   deleteBudgetAction,
   deleteExpenseAction,
+  listBudgetsAction,
   listExpensesAction,
   setBudgetLockedAction,
   updateBudgetAction,
@@ -80,6 +82,13 @@ interface TrackerContextValue {
   pending: boolean;
   budgets: Budget[];
   budgetSummaries: BudgetSummary[];
+  /** Open allotments — everything the user can still spend against. */
+  activeBudgetSummaries: BudgetSummary[];
+  /**
+   * Allotments spent down to exactly ₱0.00 and closed, newest first. Shown as a
+   * read-only archive and deliberately absent from every other list.
+   */
+  completedBudgetSummaries: BudgetSummary[];
   /**
    * Budgets that could fund an expense dated today: those whose period covers
    * it, plus every general allotment. Several may apply at once — there is
@@ -101,8 +110,13 @@ interface TrackerContextValue {
   setBudgetLocked: (id: string, locked: boolean) => Promise<boolean>;
   deleteBudget: (id: string) => Promise<boolean>;
 
-  addExpense: (input: ExpenseInput) => Promise<boolean>;
-  updateExpense: (id: string, input: ExpenseInput) => Promise<boolean>;
+  /**
+   * Records an expense. `completed` names the allotment if this write spent it
+   * out, so the caller can say so in the same breath as "saved" rather than in
+   * a second toast that replaces the first.
+   */
+  addExpense: (input: ExpenseInput) => Promise<ExpenseWriteOutcome>;
+  updateExpense: (id: string, input: ExpenseInput) => Promise<ExpenseWriteOutcome>;
   deleteExpense: (id: string) => Promise<boolean>;
 
   getBudget: (id: string) => Budget | null;
@@ -113,7 +127,17 @@ interface TrackerContextValue {
    * whose own amount must not count against the user twice.
    */
   availableBalanceFor: (budgetId: string, excluding?: Expense | null) => number;
-  isBudgetCompleted: (budget: Budget) => boolean;
+  /** True when the budget's amount and dates are read-only. */
+  isBudgetImmutable: (budget: Budget) => boolean;
+  /** True when the budget is closed: no edits, no deletes, no unlock, ever. */
+  isBudgetFullySpent: (budget: Budget) => boolean;
+}
+
+/** The result of writing an expense, and whether it closed its budget. */
+export interface ExpenseWriteOutcome {
+  saved: boolean;
+  /** The budget this write spent out, if any. */
+  completed: Budget | null;
 }
 
 const TrackerContext = createContext<TrackerContextValue | null>(null);
@@ -210,17 +234,25 @@ export function TrackerProvider({
     });
   }, []);
 
-  /** Re-reads the totals and the current page after a write. */
+  /**
+   * Re-reads the budgets, the totals and the current page after a write.
+   *
+   * The budgets are re-read because a write can change their lifecycle, not
+   * just their numbers: an expense that spends the last centavo closes its
+   * allotment, and the screen has to stop offering it immediately.
+   */
   const refresh = useCallback(async () => {
-    const [totalsResult] = await Promise.all([
+    const [budgetsResult, totalsResult] = await Promise.all([
+      listBudgetsAction(),
       budgetTotalsAction(),
       fetchPage(query),
     ]);
+    if (budgetsResult.ok) setBudgets(budgetsResult.data);
     if (totalsResult.ok) setTotals(totalsResult.data);
   }, [fetchPage, query]);
 
   /** Wraps a mutation so the UI can show that something is being saved. */
-  const track = useCallback(async (run: () => Promise<boolean>) => {
+  const track = useCallback(async <T,>(run: () => Promise<T>): Promise<T> => {
     inFlightRef.current += 1;
     setInFlight(inFlightRef.current);
     try {
@@ -291,26 +323,53 @@ export function TrackerProvider({
     [fail, refresh, track],
   );
 
+  /**
+   * True when this write is what closed the budget.
+   *
+   * The transition happens without the user asking for it, so the caller has to
+   * be able to say so — otherwise an allotment vanishes from every picker and
+   * the next expense has nowhere to go for no visible reason.
+   */
+  const justClosed = useCallback(
+    (budgetId: string, after: Budget): Budget | null => {
+      const before = budgets.find((budget) => budget.id === budgetId);
+      return before && !isFullySpent(before) && isFullySpent(after) ? after : null;
+    },
+    [budgets],
+  );
+
+  const REFUSED: ExpenseWriteOutcome = { saved: false, completed: null };
+
   const addExpense = useCallback(
     (input: ExpenseInput) =>
       track(async () => {
         const result = await createExpenseAction(input);
-        if (!result.ok) return fail(result.error);
+        if (!result.ok) {
+          fail(result.error);
+          return REFUSED;
+        }
+        const completed = justClosed(input.budgetId, result.data.budget);
         await refresh();
-        return true;
+        return { saved: true, completed };
       }),
-    [fail, refresh, track],
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+    [fail, justClosed, refresh, track],
   );
 
   const updateExpense = useCallback(
     (id: string, input: ExpenseInput) =>
       track(async () => {
         const result = await updateExpenseAction(id, input);
-        if (!result.ok) return fail(result.error);
+        if (!result.ok) {
+          fail(result.error);
+          return REFUSED;
+        }
+        const completed = justClosed(input.budgetId, result.data.budget);
         await refresh();
-        return true;
+        return { saved: true, completed };
       }),
-    [fail, refresh, track],
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+    [fail, justClosed, refresh, track],
   );
 
   const deleteExpense = useCallback(
@@ -364,7 +423,30 @@ export function TrackerProvider({
     [budgets, totals],
   );
 
-  const isBudgetCompleted = useCallback((budget: Budget) => isCompleted(budget), []);
+  const activeBudgetSummaries = useMemo(
+    () => budgetSummaries.filter((entry) => !isFullySpent(entry.budget)),
+    [budgetSummaries],
+  );
+
+  /** Newest completion first: the archive reads as a history, not a backlog. */
+  const completedBudgetSummaries = useMemo(
+    () =>
+      budgetSummaries
+        .filter((entry) => isFullySpent(entry.budget))
+        .sort(
+          (a, b) =>
+            (b.budget.completedAt ?? "").localeCompare(a.budget.completedAt ?? "") ||
+            a.budget.id.localeCompare(b.budget.id),
+        ),
+    [budgetSummaries],
+  );
+
+  const isBudgetFullySpent = useCallback((budget: Budget) => isFullySpent(budget), []);
+
+  const isBudgetImmutable = useCallback(
+    (budget: Budget) => isFullySpent(budget) || isPeriodEnded(budget),
+    [],
+  );
 
   const value = useMemo<TrackerContextValue>(
     () => ({
@@ -372,6 +454,8 @@ export function TrackerProvider({
       pending: inFlight > 0,
       budgets: sortedBudgets,
       budgetSummaries,
+      activeBudgetSummaries,
+      completedBudgetSummaries,
       todaysBudgets,
       expenses,
       expensePagination,
@@ -389,12 +473,15 @@ export function TrackerProvider({
       getBudgetSummary,
       budgetsCovering,
       availableBalanceFor,
-      isBudgetCompleted,
+      isBudgetImmutable,
+      isBudgetFullySpent,
     }),
     [
       inFlight,
       sortedBudgets,
       budgetSummaries,
+      activeBudgetSummaries,
+      completedBudgetSummaries,
       todaysBudgets,
       expenses,
       expensePagination,
@@ -412,7 +499,8 @@ export function TrackerProvider({
       getBudgetSummary,
       budgetsCovering,
       availableBalanceFor,
-      isBudgetCompleted,
+      isBudgetImmutable,
+      isBudgetFullySpent,
     ],
   );
 

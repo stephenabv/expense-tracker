@@ -191,20 +191,27 @@ export function ExpenseFormModal({
 
     // Only announce success once the server has actually accepted it, and only
     // close then: a refusal leaves the form open with the values intact.
-    const saved =
+    const write =
       isEditing && expense
         ? await updateExpense(expense.id, values)
         : await addExpense(values);
 
-    if (!saved) {
+    if (!write.saved) {
       setSubmitting(false);
       return;
     }
 
+    const saved = isEditing
+      ? "Expense updated"
+      : `${values.name} · ${formatCurrency(values.amount)} added`;
+
+    // One message, not two: an expense that spends the last centavo closes its
+    // allotment, and the user needs to hear that in the same breath — a second
+    // toast a moment later would simply replace this one.
     showToast(
-      isEditing
-        ? "Expense updated"
-        : `${values.name} · ${formatCurrency(values.amount)} added`,
+      write.completed
+        ? `${saved}. ${write.completed.name} is now fully spent and locked.`
+        : saved,
       "positive",
     );
     onClose();

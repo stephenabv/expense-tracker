@@ -54,7 +54,13 @@ function Welcome({ onCreate }: { onCreate: () => void }) {
  * and selecting one opens its detail.
  */
 export function Dashboard() {
-  const { hydrated, budgets, budgetSummaries, todaysBudgets } = useTracker();
+  const {
+    hydrated,
+    budgets,
+    activeBudgetSummaries,
+    completedBudgetSummaries,
+    todaysBudgets,
+  } = useTracker();
 
   const [addExpenseOpen, setAddExpenseOpen] = useState(false);
   const [budgetFormOpen, setBudgetFormOpen] = useState(false);
@@ -98,8 +104,22 @@ export function Dashboard() {
         {/* Bottom padding clears the floating action button. */}
         <div className="space-y-4 pb-32 sm:space-y-5">
           <BudgetOverview
-            summaries={budgetSummaries}
+            summaries={activeBudgetSummaries}
             availableIds={availableIds}
+            onSelect={setViewing}
+          />
+
+          {/*
+           * Closed allotments are shown separately and never counted as funds.
+           * Mixing them into the list above would put ₱0.00 rows among the
+           * money that is actually available to spend.
+           */}
+          <BudgetOverview
+            summaries={completedBudgetSummaries}
+            title="Completed Budgets"
+            headingId="completed-budgets-heading"
+            description="Fully spent and locked — kept as a record."
+            hideManageLink
             onSelect={setViewing}
           />
 

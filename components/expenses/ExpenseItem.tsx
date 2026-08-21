@@ -40,10 +40,33 @@ function DeleteIcon() {
   );
 }
 
+function LockIcon() {
+  return (
+    <svg
+      aria-hidden="true"
+      viewBox="0 0 20 20"
+      fill="none"
+      stroke="currentColor"
+      strokeWidth={1.6}
+      strokeLinecap="round"
+      strokeLinejoin="round"
+      className="h-4 w-4"
+    >
+      <rect x="4.5" y="8.5" width="11" height="7.5" rx="2" />
+      <path d="M7.5 8.5V6.5a2.5 2.5 0 0 1 5 0v2" />
+    </svg>
+  );
+}
+
 export interface ExpenseItemProps {
   expense: Expense;
   /** Name of the allotment this expense is charged to. */
   budgetName?: string;
+  /**
+   * The allotment behind this expense is fully spent, so the row is a record:
+   * it shows a lock instead of Edit and Delete.
+   */
+  locked?: boolean;
   onEdit: (expense: Expense) => void;
   onDelete: (expense: Expense) => void;
 }
@@ -52,6 +75,7 @@ export interface ExpenseItemProps {
 export function ExpenseItem({
   expense,
   budgetName,
+  locked = false,
   onEdit,
   onDelete,
 }: ExpenseItemProps) {
@@ -92,6 +116,18 @@ export function ExpenseItem({
         {formatCurrency(expense.amount)}
       </p>
 
+      {/* Hidden, not disabled: a greyed-out Edit invites a click and then
+          explains itself, while the lock says up front that this row is
+          finished. The server refuses the write either way. */}
+      {locked ? (
+        <span
+          title={`${budgetName ?? "This budget"} is fully spent — this expense is locked`}
+          className="flex h-8 w-8 shrink-0 items-center justify-center text-muted"
+        >
+          <span className="sr-only">Locked — this budget is fully spent</span>
+          <LockIcon />
+        </span>
+      ) : (
       <div className="flex shrink-0 items-center gap-0.5">
         <button
           type="button"
@@ -110,6 +146,7 @@ export function ExpenseItem({
           <DeleteIcon />
         </button>
       </div>
+      )}
     </li>
   );
 }

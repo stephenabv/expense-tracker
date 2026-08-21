@@ -31,11 +31,12 @@ function LockIcon({ open }: { open: boolean }) {
 
 export interface BudgetCardProps {
   summary: BudgetSummary;
-  /** Completed periods are immutable, so their actions are presented differently. */
+  /** A budget whose period has passed: read-only, but still deletable. */
   immutable: boolean;
   onView: () => void;
-  onEdit: () => void;
-  onDelete: () => void;
+  /** Omitted for a fully spent budget, which has no actions but View. */
+  onEdit?: () => void;
+  onDelete?: () => void;
 }
 
 /** One allotment: its terms, its own spend, and its own remaining balance. */
@@ -47,15 +48,27 @@ export function BudgetCard({
   onDelete,
 }: BudgetCardProps) {
   const { budget, totalExpenses, remaining, status, spentRatio, isOverspent } = summary;
+  const fullySpent = status === "fully-spent";
 
+  // A budget spent to exactly its allotment hit the target; the amber "nearly
+  // out" tone would read as a problem where there is none.
   const barTone = isOverspent
     ? "bg-danger"
-    : spentRatio >= 0.85
-      ? "bg-warning"
-      : "bg-positive";
+    : fullySpent
+      ? "bg-foreground"
+      : spentRatio >= 0.85
+        ? "bg-warning"
+        : "bg-positive";
 
   return (
-    <article className="flex animate-rise-in flex-col rounded-2xl border border-border-subtle bg-surface p-4 shadow-card transition-shadow duration-200 hover:shadow-raised sm:p-5">
+    <article
+      className={cn(
+        "flex animate-rise-in flex-col rounded-2xl border bg-surface p-4 shadow-card transition-shadow duration-200 hover:shadow-raised sm:p-5",
+        // A closed budget is set apart from the open ones at a glance, without
+        // being greyed out — it is a record, not a disabled control.
+        fullySpent ? "border-border-strong" : "border-border-subtle",
+      )}
+    >
       <div className="flex items-start justify-between gap-3">
         <div className="min-w-0">
           <h3 className="truncate text-[0.9375rem] font-semibold tracking-tight text-foreground">
@@ -119,10 +132,18 @@ export function BudgetCard({
           View
         </Button>
 
-        {immutable ? (
+        {/* A fully spent budget offers exactly one action. There is no edit, no
+            delete and no unlock — not hidden behind a confirmation, simply not
+            there, because the record is final. */}
+        {fullySpent ? (
+          <span className="inline-flex items-center gap-1 rounded-full bg-surface-muted px-2.5 py-1 text-[0.6875rem] font-medium text-muted-strong ring-1 ring-inset ring-border-subtle">
+            <LockIcon open={false} />
+            Locked
+          </span>
+        ) : immutable ? (
           <span className="inline-flex items-center gap-1 rounded-full bg-surface-muted px-2.5 py-1 text-[0.6875rem] font-medium text-muted ring-1 ring-inset ring-border-subtle">
             <LockIcon open={false} />
-            Completed — locked
+            Period ended — locked
           </span>
         ) : (
           <>

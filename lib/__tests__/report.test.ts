@@ -2,13 +2,14 @@ import { describe, expect, it } from "vitest";
 
 import {
   budgetPeriodLabel,
+  budgetStatusLabel,
   buildHistoryReport,
   groupDaysByDate,
   historyReportFilename,
   reportSummaryRows,
 } from "@/lib/pdf/report";
 import { buildHistory, filterHistory, summarizeHistory } from "@/lib/history";
-import { budget, expense, generalBudget } from "./helpers";
+import { budget, completedBudget, expense, generalBudget } from "./helpers";
 
 const generatedAt = new Date(2026, 7, 18, 9, 30);
 
@@ -332,6 +333,46 @@ describe("per-budget accounting in the report", () => {
     // Spending happened only on Aug 5, but the budget runs Aug 1–5.
     expect(week.firstDate).toBe("2026-08-05");
     expect(budgetPeriodLabel(week)).toBe("August 1, 2026 – August 5, 2026");
+  });
+});
+
+describe("fully spent budgets in the report", () => {
+  const closed = completedBudget("c1", "August Food", 1_000, "2026-08-01", "2026-08-31");
+  const open = budget("c2", "September Food", 2_000, "2026-09-01", "2026-09-30");
+  const charged = [
+    expense("x1", "c1", "Groceries", 1_000, "2026-08-03"),
+    expense("x2", "c2", "Groceries", 500, "2026-09-03"),
+  ];
+  const both = buildHistory([closed, open], charged);
+
+  it("keeps a closed allotment in the report rather than dropping it", () => {
+    const summary = summarizeHistory(both);
+
+    // Excluding it would understate both figures by the closed budget's share.
+    expect(summary.budgetCount).toBe(2);
+    expect(summary.totalAllocated).toBe(3_000);
+    expect(summary.totalExpenses).toBe(1_500);
+  });
+
+  it("distinguishes an active allotment from a fully spent one", () => {
+    const summary = summarizeHistory(both);
+    const rows = summary.budgets.map((entry) => [
+      entry.budgetName,
+      budgetStatusLabel(entry),
+    ]);
+
+    expect(rows).toContainEqual(["August Food", "Fully Spent"]);
+    expect(rows).toContainEqual(["September Food", "Active"]);
+  });
+
+  it("still renders a document containing both", () => {
+    const doc = buildHistoryReport({
+      days: [...both].reverse(),
+      summary: summarizeHistory(both),
+      periodLabel: "All recorded history",
+      generatedAt,
+    });
+    expect(header(toBytes(doc))).toBe("%PDF-");
   });
 });
 

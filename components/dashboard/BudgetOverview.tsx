@@ -5,7 +5,7 @@ import Link from "next/link";
 import type { Budget, BudgetSummary } from "@/types/budget";
 import { BudgetStatusBadge } from "@/components/budgets/BudgetStatusBadge";
 import { formatCurrency } from "@/lib/currency";
-import { describeBudgetPeriod } from "@/lib/budgets";
+import { FULLY_SPENT_LABEL, describeBudgetPeriod } from "@/lib/budgets";
 import { cn } from "@/lib/utils";
 
 export interface BudgetOverviewProps {
@@ -14,6 +14,14 @@ export interface BudgetOverviewProps {
   availableIds?: Set<string>;
   /** Opens one allotment's detail. */
   onSelect?: (budget: Budget) => void;
+  /** Section heading. Defaults to the open-allotments list. */
+  title?: string;
+  /** Unique id for the heading, so two lists can sit on one page. */
+  headingId?: string;
+  /** One line under the heading, e.g. what makes this list different. */
+  description?: string;
+  /** Hides the link to the budgets screen. */
+  hideManageLink?: boolean;
 }
 
 /**
@@ -27,27 +35,38 @@ export function BudgetOverview({
   summaries,
   availableIds,
   onSelect,
+  title = "Your Budgets",
+  headingId = "your-budgets-heading",
+  description,
+  hideManageLink = false,
 }: BudgetOverviewProps) {
   if (summaries.length === 0) return null;
 
   return (
     <section
-      aria-labelledby="your-budgets-heading"
+      aria-labelledby={headingId}
       className="overflow-hidden rounded-2xl border border-border-subtle bg-surface shadow-card"
     >
       <div className="flex items-center justify-between gap-3 border-b border-border-subtle px-4 py-3.5 sm:px-5">
-        <h2
-          id="your-budgets-heading"
-          className="text-[0.9375rem] font-semibold tracking-tight text-foreground"
-        >
-          Your Budgets
-        </h2>
-        <Link
-          href="/budgets"
-          className="rounded-lg text-[0.8125rem] font-medium text-muted underline-offset-4 hover:text-foreground hover:underline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-ring"
-        >
-          Manage
-        </Link>
+        <div className="min-w-0">
+          <h2
+            id={headingId}
+            className="text-[0.9375rem] font-semibold tracking-tight text-foreground"
+          >
+            {title}
+          </h2>
+          {description ? (
+            <p className="mt-0.5 text-[0.8125rem] text-muted">{description}</p>
+          ) : null}
+        </div>
+        {hideManageLink ? null : (
+          <Link
+            href="/budgets"
+            className="shrink-0 rounded-lg text-[0.8125rem] font-medium text-muted underline-offset-4 hover:text-foreground hover:underline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-ring"
+          >
+            Manage
+          </Link>
+        )}
       </div>
 
       <ul className="divide-y divide-border-subtle">
@@ -64,6 +83,15 @@ export function BudgetOverview({
                   {available ? (
                     <span className="shrink-0 rounded-full bg-foreground px-1.5 py-0.5 text-[0.625rem] font-semibold uppercase tracking-wide text-background">
                       Available
+                    </span>
+                  ) : null}
+                  {/* The status badge on the right is hidden on a phone, where
+                      the row has no width for it — but "₱0.00 remaining" alone
+                      does not say the budget is closed, so the state rides next
+                      to the name at every size. */}
+                  {summary.status === "fully-spent" ? (
+                    <span className="shrink-0 rounded-full bg-foreground px-1.5 py-0.5 text-[0.625rem] font-semibold uppercase tracking-wide text-background sm:hidden">
+                      🔒 {FULLY_SPENT_LABEL}
                     </span>
                   ) : null}
                 </div>

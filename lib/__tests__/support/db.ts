@@ -8,7 +8,7 @@
 
 import { PGlite } from "@electric-sql/pglite";
 
-import { migrate, setDatabase, type SqlExecutor } from "@/lib/db/client";
+import { migrate, pgliteExecutor, setDatabase, type SqlExecutor } from "@/lib/db/client";
 
 export interface TestDatabase extends SqlExecutor {
   reset(): Promise<void>;
@@ -18,18 +18,16 @@ export interface TestDatabase extends SqlExecutor {
 export async function createTestDatabase(): Promise<TestDatabase> {
   const pg = await PGlite.create();
 
-  const executor: SqlExecutor = {
-    async query(text, params) {
-      const result = await pg.query(text, params as unknown[]);
-      return { rows: result.rows as never[] };
-    },
-  };
+  // The same wrapper the embedded dev database uses, so the tests exercise the
+  // real transaction path rather than a stand-in that cannot roll back.
+  const executor: SqlExecutor = pgliteExecutor(pg);
 
   await migrate(executor);
   setDatabase(executor);
 
   return {
     query: executor.query,
+    transaction: executor.transaction,
     async reset() {
       // TRUNCATE cascades to every dependent table, so each test starts clean.
       await pg.exec("TRUNCATE users CASCADE;");

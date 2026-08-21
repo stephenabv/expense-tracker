@@ -12,7 +12,7 @@ import { Button } from "@/components/ui/Button";
 import { BudgetStatusBadge } from "@/components/budgets/BudgetStatusBadge";
 import { formatCurrency } from "@/lib/currency";
 import { formatDateKey } from "@/lib/dates";
-import { describeBudgetPeriodLong } from "@/lib/budgets";
+import { describeBudgetPeriodLong, isFullySpent } from "@/lib/budgets";
 import { cn } from "@/lib/utils";
 
 export interface BudgetDetailModalProps {
@@ -57,6 +57,8 @@ export function BudgetDetailModal({ open, onClose, budget }: BudgetDetailModalPr
 
   if (!budget || !summary) return null;
 
+  const closed = isFullySpent(budget);
+
   return (
     <Modal
       open={open}
@@ -80,6 +82,17 @@ export function BudgetDetailModal({ open, onClose, budget }: BudgetDetailModalPr
                 : `${summary.durationDays} days`}
           </span>
         </div>
+
+        {/* This view is read-only for every budget; for a closed one it is
+            also the only view there is, so it says why. */}
+        {closed ? (
+          <p className="rounded-xl border border-border-strong bg-surface-muted px-4 py-3 text-[0.8125rem] text-muted-strong">
+            <span aria-hidden="true">🔒 </span>
+            This allotment was spent down to {formatCurrency(0)} and is locked.
+            It and the expenses below are a permanent record — they can no
+            longer be edited, deleted, or added to.
+          </p>
+        ) : null}
 
         <dl className="space-y-2.5 rounded-xl border border-border-subtle bg-surface-muted p-4">
           <div className="flex items-baseline justify-between gap-4">

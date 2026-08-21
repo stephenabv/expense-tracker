@@ -30,8 +30,14 @@ function BudgetsSkeleton() {
 
 /** Create, review and manage every budget allotment. */
 export function BudgetsView() {
-  const { hydrated, budgetSummaries, deleteBudget, isBudgetCompleted, getBudgetSummary } =
-    useTracker();
+  const {
+    hydrated,
+    activeBudgetSummaries,
+    completedBudgetSummaries,
+    deleteBudget,
+    isBudgetImmutable,
+    getBudgetSummary,
+  } = useTracker();
   const { showToast } = useToast();
 
   const [formOpen, setFormOpen] = useState(false);
@@ -56,12 +62,22 @@ export function BudgetsView() {
     setPendingDelete(null);
   };
 
+  /*
+   * The headline figures describe the open allotments only.
+   *
+   * A fully spent budget has ₱0.00 left by definition, so folding it in would
+   * drag "remaining" down with money that was never available — the number is
+   * meant to answer "what can I still spend?", and a closed budget answers
+   * nothing.
+   */
   const totalAllotted = sumAmounts(
-    budgetSummaries.map((summary) => summary.budget.amount),
+    activeBudgetSummaries.map((summary) => summary.budget.amount),
   );
   const totalRemaining = sumAmounts(
-    budgetSummaries.map((summary) => summary.remaining),
+    activeBudgetSummaries.map((summary) => summary.remaining),
   );
+  const hasAny =
+    activeBudgetSummaries.length + completedBudgetSummaries.length > 0;
 
   if (!hydrated) {
     return (
@@ -79,7 +95,7 @@ export function BudgetsView() {
             <h2 className="text-[0.9375rem] font-semibold tracking-tight text-foreground">
               Budget Allotments
             </h2>
-            {budgetSummaries.length > 0 ? (
+            {activeBudgetSummaries.length > 0 ? (
               <p className="mt-0.5 text-[0.8125rem] text-muted">
                 <span className="tabular">{formatCurrency(totalAllotted)}</span>{" "}
                 allotted ·{" "}
@@ -105,7 +121,7 @@ export function BudgetsView() {
           </Button>
         </div>
 
-        {budgetSummaries.length === 0 ? (
+        {!hasAny ? (
           <div className="flex flex-col items-center rounded-2xl border border-border-subtle bg-surface px-6 py-14 text-center shadow-card">
             <div
               aria-hidden="true"
@@ -135,13 +151,28 @@ export function BudgetsView() {
               Create your first budget
             </Button>
           </div>
+        ) : activeBudgetSummaries.length === 0 ? (
+          // Every allotment has been spent out. Saying so beats an empty grid,
+          // and points at the only thing left to do.
+          <div className="rounded-2xl border border-border-subtle bg-surface px-6 py-10 text-center shadow-card">
+            <h3 className="text-base font-semibold text-foreground">
+              No active allotments
+            </h3>
+            <p className="mx-auto mt-1 max-w-sm text-sm text-muted">
+              Everything you have budgeted is fully spent. Create a new allotment
+              to keep recording expenses.
+            </p>
+            <Button onClick={openCreate} className="mt-5">
+              Add Allotment
+            </Button>
+          </div>
         ) : (
           <div className="grid grid-cols-1 gap-4 sm:grid-cols-2">
-            {budgetSummaries.map((summary) => (
+            {activeBudgetSummaries.map((summary) => (
               <BudgetCard
                 key={summary.budget.id}
                 summary={summary}
-                immutable={isBudgetCompleted(summary.budget)}
+                immutable={isBudgetImmutable(summary.budget)}
                 onView={() => setViewing(summary.budget)}
                 onEdit={() => openEdit(summary.budget)}
                 onDelete={() => setPendingDelete(summary.budget)}
@@ -150,11 +181,61 @@ export function BudgetsView() {
           </div>
         )}
 
-        {budgetSummaries.length > 0 ? (
+        {activeBudgetSummaries.length > 0 ? (
           <p className="text-[0.8125rem] text-muted">
-            Completed allotments are locked so past reports stay accurate. Create
-            a new budget for a new period instead of reopening an old one.
+            Allotments whose period has ended are locked so past reports stay
+            accurate. Create a new budget for a new period instead of reopening
+            an old one.
           </p>
+        ) : null}
+
+        {/*
+         * Completed allotments live in their own section rather than mixed into
+         * the list above. They cannot be spent against, edited or deleted, so
+         * leaving them among the working budgets would offer choices that are
+         * not choices.
+         */}
+        {completedBudgetSummaries.length > 0 ? (
+          <section aria-labelledby="completed-budgets-heading" className="pt-2">
+            <div className="flex flex-wrap items-baseline justify-between gap-x-3 gap-y-1">
+              <h2
+                id="completed-budgets-heading"
+                className="text-[0.9375rem] font-semibold tracking-tight text-foreground"
+              >
+                Completed Budgets
+              </h2>
+              <p className="text-[0.8125rem] text-muted">
+                <span className="tabular">
+                  {formatCurrency(
+                    sumAmounts(
+                      completedBudgetSummaries.map((s) => s.budget.amount),
+                    ),
+                  )}
+                </span>{" "}
+                fully spent across{" "}
+                {completedBudgetSummaries.length === 1
+                  ? "1 allotment"
+                  : `${completedBudgetSummaries.length} allotments`}
+              </p>
+            </div>
+
+            <p className="mt-1 text-[0.8125rem] text-muted">
+              Spent down to {formatCurrency(0)} and locked. These and their
+              expenses are kept as a permanent record and can no longer be
+              changed.
+            </p>
+
+            <div className="mt-4 grid grid-cols-1 gap-4 sm:grid-cols-2">
+              {completedBudgetSummaries.map((summary) => (
+                <BudgetCard
+                  key={summary.budget.id}
+                  summary={summary}
+                  immutable
+                  onView={() => setViewing(summary.budget)}
+                />
+              ))}
+            </div>
+          </section>
         ) : null}
       </div>
 

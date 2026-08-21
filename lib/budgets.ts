@@ -113,39 +113,69 @@ export function calculateBudgetRemaining(
 /**
  * Status of a budget on a given day.
  *
- * Overspending outranks everything else: a budget past its allotment says so
- * whether it is running, finished, or general.
+ * "Fully spent" outranks everything: once an allotment is closed, what its
+ * calendar says stopped mattering. Overspending comes next — a budget past its
+ * allotment says so whether it is running, finished, or general.
  *
- * A general allotment never becomes "completed" — no amount of calendar drift
- * retires it. It stays available until the user changes or deletes it.
+ * A general allotment's period never ends — no amount of calendar drift retires
+ * it. It stays available until the user changes or deletes it.
  */
 export function budgetStatus(
   budget: Budget,
   expenses: Expense[],
   now: Date = new Date(),
 ): BudgetStatus {
+  if (isFullySpent(budget)) return "fully-spent";
   if (calculateBudgetRemaining(budget, expenses) < 0) return "over-budget";
   if (isGeneralBudget(budget)) return "unrestricted";
 
   const today = todayKey(now);
   if (today < budget.startDate!) return "upcoming";
-  if (today > budget.endDate!) return "completed";
+  if (today > budget.endDate!) return "period-ended";
   return "active";
 }
 
 /**
- * True once the period has ended. Completed budgets are immutable.
+ * True when the budget has been spent down to exactly ₱0.00 and closed.
  *
- * General allotments are never completed, so they stay editable.
+ * Read from the stored lifecycle, never recomputed from the balance: the
+ * balance is what the numbers say today, while this is what happened to the
+ * budget. Deriving it would mean a later edit to the allotment could silently
+ * reopen a record that is meant to be final.
  */
-export function isCompleted(budget: Budget, now: Date = new Date()): boolean {
+export function isFullySpent(budget: Pick<Budget, "status">): boolean {
+  return budget.status === "fully_spent";
+}
+
+/**
+ * True once the period has ended.
+ *
+ * General allotments have no period, so this is never true for them.
+ */
+export function isPeriodEnded(budget: Budget, now: Date = new Date()): boolean {
   if (isGeneralBudget(budget)) return false;
   return todayKey(now) > budget.endDate!;
 }
 
 /** True when the budget can fund an expense dated today. */
 export function isActive(budget: Budget, now: Date = new Date()): boolean {
-  return coversDate(budget, todayKey(now));
+  return !isFullySpent(budget) && coversDate(budget, todayKey(now));
+}
+
+/** Open allotments: everything that has not been spent out. */
+export function activeBudgets(budgets: Budget[]): Budget[] {
+  return budgets.filter((budget) => !isFullySpent(budget));
+}
+
+/** Closed allotments, newest completion first — the archive. */
+export function completedBudgets(budgets: Budget[]): Budget[] {
+  return budgets
+    .filter(isFullySpent)
+    .sort(
+      (a, b) =>
+        (b.completedAt ?? "").localeCompare(a.completedAt ?? "") ||
+        a.id.localeCompare(b.id),
+    );
 }
 
 /** Everything the UI needs about one budget, derived in one place. */
@@ -215,15 +245,16 @@ export function summarizeBudgetFromTotals(
     expenseCount: totals?.expenseCount ?? 0,
     // Status needs to know only whether this budget is overspent, which the
     // total already answers — so no expense rows are required here either.
-    status:
-      remaining < 0
+    status: isFullySpent(budget)
+      ? "fully-spent"
+      : remaining < 0
         ? "over-budget"
         : isGeneralBudget(budget)
           ? "unrestricted"
           : todayKey(now) < budget.startDate!
             ? "upcoming"
             : todayKey(now) > budget.endDate!
-              ? "completed"
+              ? "period-ended"
               : "active",
     applicability: budgetApplicability(budget),
     spentRatio:
@@ -282,7 +313,9 @@ export function sortBudgetsByPeriod(budgets: Budget[]): Budget[] {
  */
 export function budgetsForDate(budgets: Budget[], date: DateKey): Budget[] {
   return budgets
-    .filter((budget) => coversDate(budget, date))
+    // A fully spent allotment has nothing left to give, so it is not merely
+    // hidden from the picker — it is not an option anywhere, at any date.
+    .filter((budget) => !isFullySpent(budget) && coversDate(budget, date))
     .sort((a, b) => {
       const aGeneral = isGeneralBudget(a);
       const bGeneral = isGeneralBudget(b);
@@ -296,7 +329,7 @@ export function budgetsForDate(budgets: Budget[], date: DateKey): Budget[] {
 
 /** General allotments, which are eligible whatever the expense date. */
 export function generalBudgets(budgets: Budget[]): Budget[] {
-  return budgets.filter(isGeneralBudget);
+  return budgets.filter((budget) => isGeneralBudget(budget) && !isFullySpent(budget));
 }
 
 /**
@@ -351,7 +384,14 @@ export function findOverlaps(
   excludeId?: string,
 ): BudgetConflict[] {
   return budgets
-    .filter((budget) => budget.id !== excludeId && !isGeneralBudget(budget))
+    .filter(
+      (budget) =>
+        budget.id !== excludeId &&
+        !isGeneralBudget(budget) &&
+        // A closed budget cannot take new expenses, so its period cannot clash
+        // with anything the user is about to create.
+        !isFullySpent(budget),
+    )
     .filter((budget) =>
       rangesOverlap(startDate, endDate, budget.startDate!, budget.endDate!),
     )
@@ -396,10 +436,16 @@ export function orphanedExpenses(
   return expenses.filter((expense) => !ids.has(expense.budgetId));
 }
 
+/** The word shown for a closed budget, in every surface that names the state. */
+export const FULLY_SPENT_LABEL = "Fully Spent";
+
 export const STATUS_LABELS: Record<BudgetStatus, string> = {
   active: "Active",
   upcoming: "Upcoming",
-  completed: "Completed",
+  // "Completed" is reserved for a budget that was spent out; a budget whose
+  // dates have simply passed is a different thing and says so.
+  "period-ended": "Period ended",
   "over-budget": "Over budget",
   unrestricted: NO_DATE_LABEL,
+  "fully-spent": FULLY_SPENT_LABEL,
 };
