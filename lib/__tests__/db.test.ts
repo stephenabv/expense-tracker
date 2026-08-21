@@ -30,6 +30,8 @@ import {
   updateExpenseRow,
   deleteExpenseRow,
 } from "@/lib/db/tracker";
+import type { Budget, BudgetInput } from "@/types/budget";
+import type { Expense, ExpenseInput } from "@/types/expense";
 import { createToken, hashToken } from "@/lib/auth/tokens";
 import { normalizeEmail } from "@/lib/auth/schemas";
 
@@ -54,6 +56,24 @@ async function makeUser(email = "a@example.com") {
     email,
     passwordHash: "hash-placeholder",
   });
+}
+
+/** Records an expense that is expected to succeed, and returns it. */
+async function record(userId: string, input: ExpenseInput): Promise<Expense> {
+  const result = await insertExpense(userId, input);
+  if (!result.ok) throw new Error(`expected a write, got "${result.reason}"`);
+  return result.expense;
+}
+
+/** Edits a budget that is expected to succeed, and returns it. */
+async function edit(
+  userId: string,
+  budgetId: string,
+  input: BudgetInput,
+): Promise<Budget> {
+  const result = await updateBudgetRow(userId, budgetId, input);
+  if (!result.ok) throw new Error(`expected a write, got "${result.reason}"`);
+  return result.budget;
 }
 
 describe("users", () => {
@@ -189,7 +209,7 @@ describe("tracker data isolation", () => {
       ...budgetInput,
       amount: 1,
     });
-    expect(result).toBeNull();
+    expect(result).toEqual({ ok: false, reason: "not-found" });
 
     const [unchanged] = await listBudgets(alice.id);
     expect(unchanged.amount).toBe(5_000);
@@ -200,7 +220,10 @@ describe("tracker data isolation", () => {
     const bob = await makeUser("bob@example.com");
     const budget = await insertBudget(alice.id, budgetInput);
 
-    expect(await deleteBudgetRow(bob.id, budget.id)).toBe(false);
+    expect(await deleteBudgetRow(bob.id, budget.id)).toEqual({
+      ok: false,
+      reason: "not-found",
+    });
     expect(await listBudgets(alice.id)).toHaveLength(1);
   });
 
@@ -215,7 +238,7 @@ describe("tracker data isolation", () => {
       amount: 100,
       expenseDate: "2026-08-02",
     });
-    expect(result).toBeNull();
+    expect(result).toEqual({ ok: false, reason: "not-found" });
     expect(await listExpenses(alice.id)).toHaveLength(0);
   });
 
@@ -223,7 +246,7 @@ describe("tracker data isolation", () => {
     const alice = await makeUser("alice@example.com");
     const bob = await makeUser("bob@example.com");
     const budget = await insertBudget(alice.id, budgetInput);
-    const expense = await insertExpense(alice.id, {
+    const expense = await record(alice.id, {
       budgetId: budget.id,
       name: "Food",
       amount: 500,
@@ -236,15 +259,18 @@ describe("tracker data isolation", () => {
     });
 
     expect(
-      await updateExpenseRow(bob.id, expense!.id, {
+      await updateExpenseRow(bob.id, expense.id, {
         budgetId: bobBudget.id,
         name: "Stolen",
         amount: 1,
         expenseDate: "2026-08-02",
       }),
-    ).toBeNull();
+    ).toEqual({ ok: false, reason: "not-found" });
 
-    expect(await deleteExpenseRow(bob.id, expense!.id)).toBe(false);
+    expect(await deleteExpenseRow(bob.id, expense.id)).toEqual({
+      ok: false,
+      reason: "not-found",
+    });
 
     const [still] = await listExpenses(alice.id);
     expect(still.name).toBe("Food");
@@ -370,22 +396,22 @@ describe("budget allotments without a date restriction", () => {
       endDate: "2026-08-05",
     });
 
-    const relaxed = await updateBudgetRow(user.id, budget.id, {
+    const relaxed = await edit(user.id, budget.id, {
       name: "August",
       amount: 5_000,
       startDate: null,
       endDate: null,
     });
-    expect(relaxed?.startDate).toBeNull();
+    expect(relaxed.startDate).toBeNull();
 
-    const restored = await updateBudgetRow(user.id, budget.id, {
+    const restored = await edit(user.id, budget.id, {
       name: "August",
       amount: 5_000,
       startDate: "2026-08-01",
       endDate: "2026-08-05",
     });
-    expect(restored?.startDate).toBe("2026-08-01");
-    expect(restored?.endDate).toBe("2026-08-05");
+    expect(restored.startDate).toBe("2026-08-01");
+    expect(restored.endDate).toBe("2026-08-05");
   });
 
   it("funds an expense on any date", async () => {
@@ -393,13 +419,13 @@ describe("budget allotments without a date restriction", () => {
     const fund = await insertBudget(user.id, general);
 
     for (const date of ["2026-08-03", "2026-12-25", "2027-01-01"]) {
-      const recorded = await insertExpense(user.id, {
+      const recorded = await record(user.id, {
         budgetId: fund.id,
         name: "Medicine",
         amount: 100,
         expenseDate: date,
       });
-      expect(recorded?.budgetId).toBe(fund.id);
+      expect(recorded.budgetId).toBe(fund.id);
     }
 
     expect(await listExpenses(user.id)).toHaveLength(3);
@@ -427,20 +453,20 @@ describe("moving an expense between allotments", () => {
   it("reverses the old deduction and applies the new one in one write", async () => {
     const { user, food, fund } = await twoBudgets();
 
-    const recorded = await insertExpense(user.id, {
+    const recorded = await record(user.id, {
       budgetId: food.id,
       name: "Groceries",
       amount: 500,
       expenseDate: "2026-08-03",
     });
 
-    const moved = await updateExpenseRow(user.id, recorded!.id, {
+    const moved = await updateExpenseRow(user.id, recorded.id, {
       budgetId: fund.id,
       name: "Groceries",
       amount: 500,
       expenseDate: "2026-08-03",
     });
-    expect(moved?.budgetId).toBe(fund.id);
+    expect(moved.ok && moved.expense.budgetId).toBe(fund.id);
 
     // The expense exists exactly once, charged to exactly one allotment: it is
     // a single UPDATE, so it can neither hit both pots nor fall out of both.
@@ -460,7 +486,7 @@ describe("moving an expense between allotments", () => {
       endDate: null,
     });
 
-    const recorded = await insertExpense(user.id, {
+    const recorded = await record(user.id, {
       budgetId: food.id,
       name: "Groceries",
       amount: 500,
@@ -468,13 +494,13 @@ describe("moving an expense between allotments", () => {
     });
 
     expect(
-      await updateExpenseRow(user.id, recorded!.id, {
+      await updateExpenseRow(user.id, recorded.id, {
         budgetId: theirs.id,
         name: "Groceries",
         amount: 500,
         expenseDate: "2026-08-03",
       }),
-    ).toBeNull();
+    ).toEqual({ ok: false, reason: "not-found" });
 
     // Untouched, and still on the original allotment.
     const [unchanged] = await listExpenses(user.id);
@@ -498,7 +524,7 @@ describe("moving an expense between allotments", () => {
         amount: 100,
         expenseDate: "2026-08-03",
       }),
-    ).toBeNull();
+    ).toEqual({ ok: false, reason: "not-found" });
     expect(await listExpenses(mallory.id)).toHaveLength(0);
   });
 

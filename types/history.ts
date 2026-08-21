@@ -8,6 +8,7 @@
  * shows up where it belongs, which a frozen daily snapshot would hide.
  */
 
+import type { BudgetLifecycle } from "@/types/budget";
 import type { DateKey } from "@/lib/dates";
 import type { Expense } from "@/types/expense";
 
@@ -25,6 +26,14 @@ export interface HistoryDay {
   /** The budget's own applicable period; `null` when it has no date restriction. */
   budgetStartDate: DateKey | null;
   budgetEndDate: DateKey | null;
+  /**
+   * Whether the budget is still open or was spent out and closed.
+   *
+   * Carried into the report so a reader can tell a budget that still has room
+   * from one that is finished — a ₱0.00 remaining balance alone does not say
+   * which, and the two mean very different things.
+   */
+  budgetStatus: BudgetLifecycle;
   /** That budget's balance entering the day. */
   startingBalance: number;
   /** That budget's balance after the day: `startingBalance - totalExpenses`. */
@@ -68,6 +77,8 @@ export interface HistoryBudgetSummary {
   /** The budget's own applicable period; `null` when unrestricted. */
   budgetStartDate: DateKey | null;
   budgetEndDate: DateKey | null;
+  /** Open, or spent out and closed. */
+  budgetStatus: BudgetLifecycle;
   /** Spend inside the selected period only. */
   totalExpenses: number;
   /** The budget's balance after the last in-range day. */

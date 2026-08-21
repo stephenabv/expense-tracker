@@ -14,7 +14,7 @@ import {
   expensesForBudget,
   expensesOutsidePeriod,
   findOverlaps,
-  isCompleted,
+  isPeriodEnded,
   orphanedExpenses,
   resolveBudgetForDate,
   sortBudgetsByPeriod,
@@ -81,7 +81,7 @@ describe("budgetStatus", () => {
   });
 
   it("marks a finished period as completed", () => {
-    expect(budgetStatus(week1, expenses, NOW)).toBe("completed");
+    expect(budgetStatus(week1, expenses, NOW)).toBe("period-ended");
   });
 
   it("marks a future period as upcoming", () => {
@@ -99,11 +99,11 @@ describe("budgetStatus", () => {
   });
 });
 
-describe("isCompleted", () => {
+describe("isPeriodEnded", () => {
   it("is true only after the period ends", () => {
-    expect(isCompleted(week1, NOW)).toBe(true);
-    expect(isCompleted(daily, NOW)).toBe(false);
-    expect(isCompleted(week1, new Date(2026, 7, 5))).toBe(false);
+    expect(isPeriodEnded(week1, NOW)).toBe(true);
+    expect(isPeriodEnded(daily, NOW)).toBe(false);
+    expect(isPeriodEnded(week1, new Date(2026, 7, 5))).toBe(false);
   });
 });
 
@@ -113,7 +113,7 @@ describe("summarizeBudget", () => {
     expect(summary.totalExpenses).toBe(1_800);
     expect(summary.remaining).toBe(3_200);
     expect(summary.expenseCount).toBe(3);
-    expect(summary.status).toBe("completed");
+    expect(summary.status).toBe("period-ended");
     expect(summary.durationDays).toBe(5);
     expect(summary.isOverspent).toBe(false);
   });
@@ -234,9 +234,9 @@ describe("general allotments", () => {
     expect(coversDate(week1, "2026-08-06")).toBe(false);
   });
 
-  it("never becomes completed as the calendar moves", () => {
+  it("never has its period end as the calendar moves", () => {
     const distantFuture = new Date(2099, 0, 1);
-    expect(isCompleted(emergency, distantFuture)).toBe(false);
+    expect(isPeriodEnded(emergency, distantFuture)).toBe(false);
     expect(budgetStatus(emergency, [], distantFuture)).toBe("unrestricted");
   });
 

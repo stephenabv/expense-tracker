@@ -32,14 +32,18 @@ import {
   setBudgetLockedRow,
   updateBudgetRow,
   updateExpenseRow,
+  type WriteRefusal,
 } from "@/lib/db/tracker";
 import { validateBudgetForm, validateExpenseForm } from "@/lib/validation";
 import {
+  FULLY_SPENT_LABEL,
   budgetApplicability,
   budgetsForDate,
   expensesOutsidePeriod,
-  isCompleted,
+  isFullySpent,
+  isPeriodEnded,
 } from "@/lib/budgets";
+import { formatCurrency } from "@/lib/currency";
 import { isDatabaseConfigured } from "@/lib/db/client";
 
 export type ActionResult<T> =
@@ -51,6 +55,34 @@ const NOT_CONFIGURED = {
   ok: false as const,
   error: "The server is not connected to a database yet.",
 };
+
+/**
+ * What the caller is told when a write is refused.
+ *
+ * The lock is not advice the UI may take or leave. Screens hide the controls,
+ * but these messages are what a request that skipped the screen entirely gets
+ * back — the rule lives on this side of the boundary.
+ */
+const LOCKED_BUDGET_ERROR = `This budget is ${FULLY_SPENT_LABEL} and locked. It can no longer be changed.`;
+const LOCKED_EXPENSE_ERROR = `This expense belongs to a ${FULLY_SPENT_LABEL} budget and can no longer be changed.`;
+
+function refusal(
+  reason: WriteRefusal,
+  remaining: number | undefined,
+  missing: string,
+  lockedError: string,
+): { ok: false; error: string } {
+  if (reason === "locked") return { ok: false, error: lockedError };
+  if (reason === "insufficient") {
+    return {
+      ok: false,
+      error: `Insufficient budget balance. ${formatCurrency(
+        Math.max(remaining ?? 0, 0),
+      )} remains in this allotment.`,
+    };
+  }
+  return { ok: false, error: missing };
+}
 
 function refresh(): void {
   revalidatePath("/tracker");
@@ -83,6 +115,15 @@ export async function listExpensesAction(
   if (!userId) return UNAUTHENTICATED;
 
   return { ok: true, data: await listExpensesPage(userId, query) };
+}
+
+/** The caller's budgets, re-read after a write that may have closed one. */
+export async function listBudgetsAction(): Promise<ActionResult<Budget[]>> {
+  if (!isDatabaseConfigured()) return NOT_CONFIGURED;
+  const userId = await getUserId();
+  if (!userId) return UNAUTHENTICATED;
+
+  return { ok: true, data: await listBudgets(userId) };
 }
 
 /** Per-budget totals, so balances survive the expense list being paginated. */
@@ -171,9 +212,19 @@ export async function updateBudgetAction(
   const target = existing.find((budget) => budget.id === budgetId);
   if (!target) return { ok: false, error: "Budget not found." };
 
-  // Completed periods are immutable, which is what keeps past reports true.
-  if (isCompleted(target)) {
-    return { ok: false, error: "Completed budgets can no longer be edited." };
+  // A budget spent down to zero is a closed record — no edit, no unlock, no
+  // exception. Re-checked in SQL as well; this is only here to say why.
+  if (isFullySpent(target)) {
+    return { ok: false, error: LOCKED_BUDGET_ERROR };
+  }
+
+  // A period that has already passed stays immutable too, which is what keeps
+  // past reports true.
+  if (isPeriodEnded(target)) {
+    return {
+      ok: false,
+      error: "Budgets whose period has ended can no longer be edited.",
+    };
   }
 
   const result = validateBudgetForm(
@@ -211,10 +262,17 @@ export async function updateBudgetAction(
   }
 
   const updated = await updateBudgetRow(userId, budgetId, result.values!);
-  if (!updated) return { ok: false, error: "Budget not found." };
+  if (!updated.ok) {
+    return refusal(
+      updated.reason,
+      updated.remaining,
+      "Budget not found.",
+      LOCKED_BUDGET_ERROR,
+    );
+  }
 
   refresh();
-  return { ok: true, data: updated };
+  return { ok: true, data: updated.budget };
 }
 
 export async function setBudgetLockedAction(
@@ -226,10 +284,19 @@ export async function setBudgetLockedAction(
   if (!userId) return UNAUTHENTICATED;
 
   const updated = await setBudgetLockedRow(userId, budgetId, locked);
-  if (!updated) return { ok: false, error: "Budget not found." };
+  if (!updated.ok) {
+    // There is no unlock for a fully spent budget; the flag this action toggles
+    // is a different lock and has no power over that one.
+    return refusal(
+      updated.reason,
+      updated.remaining,
+      "Budget not found.",
+      LOCKED_BUDGET_ERROR,
+    );
+  }
 
   refresh();
-  return { ok: true, data: updated };
+  return { ok: true, data: updated.budget };
 }
 
 export async function deleteBudgetAction(
@@ -240,7 +307,14 @@ export async function deleteBudgetAction(
   if (!userId) return UNAUTHENTICATED;
 
   const deleted = await deleteBudgetRow(userId, budgetId);
-  if (!deleted) return { ok: false, error: "Budget not found." };
+  if (!deleted.ok) {
+    return refusal(
+      deleted.reason,
+      deleted.remaining,
+      "Budget not found.",
+      LOCKED_BUDGET_ERROR,
+    );
+  }
 
   refresh();
   return { ok: true, data: { id: budgetId } };
@@ -258,6 +332,19 @@ async function validateExpenseAgainstServer(
   // below — the check cannot be forgotten because there is nothing else to
   // match against.
   const { budgets, expenses } = await loadTrackerData(userId);
+
+  /*
+   * A fully spent budget is refused by name rather than by absence.
+   *
+   * `budgetsForDate` already leaves closed allotments out, so this would fail
+   * anyway — but as "not available for the selected date", which is the wrong
+   * reason and would puzzle anyone whose budget closed while the form was open.
+   */
+  const named = budgets.find((budget) => budget.id === input.budgetId);
+  if (named && isFullySpent(named)) {
+    return { ok: false, error: LOCKED_BUDGET_ERROR };
+  }
+
   const eligible = budgetsForDate(budgets, input.expenseDate);
 
   const budget = eligible.find((entry) => entry.id === input.budgetId);
@@ -294,9 +381,22 @@ async function validateExpenseAgainstServer(
   return { ok: true };
 }
 
+/**
+ * What an expense write returns.
+ *
+ * The budget comes back with the expense because recording one can close it:
+ * the client has to learn that the allotment it just spent against is now a
+ * locked record, and learning it from the same response means there is no
+ * moment where the screen still offers to spend more.
+ */
+export interface ExpenseWrite {
+  expense: Expense;
+  budget: Budget;
+}
+
 export async function createExpenseAction(
   input: ExpenseInput,
-): Promise<ActionResult<Expense>> {
+): Promise<ActionResult<ExpenseWrite>> {
   if (!isDatabaseConfigured()) return NOT_CONFIGURED;
   const userId = await getUserId();
   if (!userId) return UNAUTHENTICATED;
@@ -304,29 +404,55 @@ export async function createExpenseAction(
   const check = await validateExpenseAgainstServer(userId, input);
   if (!check.ok) return check;
 
-  const expense = await insertExpense(userId, input);
-  if (!expense) return { ok: false, error: "Budget not found." };
+  /*
+   * The validation above reads a balance; this call re-checks it while holding
+   * the budget's row lock and writes in the same transaction. Two requests that
+   * both passed validation against the same ₱500 cannot both commit — the
+   * second one blocks, re-reads, and is refused.
+   */
+  const result = await insertExpense(userId, input);
+  if (!result.ok) {
+    return refusal(
+      result.reason,
+      result.remaining,
+      "Budget not found.",
+      LOCKED_BUDGET_ERROR,
+    );
+  }
 
   refresh();
-  return { ok: true, data: expense };
+  return { ok: true, data: { expense: result.expense, budget: result.budget } };
 }
 
 export async function updateExpenseAction(
   expenseId: string,
   input: ExpenseInput,
-): Promise<ActionResult<Expense>> {
+): Promise<ActionResult<ExpenseWrite>> {
   if (!isDatabaseConfigured()) return NOT_CONFIGURED;
   const userId = await getUserId();
   if (!userId) return UNAUTHENTICATED;
 
+  // An expense charged to a closed budget is part of that record. Changing it
+  // — including moving it to another allotment — would rewrite history, so the
+  // request is refused before it is even validated.
+  const locked = await expenseBelongsToClosedBudget(userId, expenseId);
+  if (locked) return { ok: false, error: LOCKED_EXPENSE_ERROR };
+
   const check = await validateExpenseAgainstServer(userId, input, expenseId);
   if (!check.ok) return check;
 
-  const updated = await updateExpenseRow(userId, expenseId, input);
-  if (!updated) return { ok: false, error: "Expense not found." };
+  const result = await updateExpenseRow(userId, expenseId, input);
+  if (!result.ok) {
+    return refusal(
+      result.reason,
+      result.remaining,
+      "Expense not found.",
+      LOCKED_EXPENSE_ERROR,
+    );
+  }
 
   refresh();
-  return { ok: true, data: updated };
+  return { ok: true, data: { expense: result.expense, budget: result.budget } };
 }
 
 export async function deleteExpenseAction(
@@ -337,8 +463,33 @@ export async function deleteExpenseAction(
   if (!userId) return UNAUTHENTICATED;
 
   const deleted = await deleteExpenseRow(userId, expenseId);
-  if (!deleted) return { ok: false, error: "Expense not found." };
+  if (!deleted.ok) {
+    return refusal(
+      deleted.reason,
+      deleted.remaining,
+      "Expense not found.",
+      LOCKED_EXPENSE_ERROR,
+    );
+  }
 
   refresh();
-  return { ok: true, data: { id: expenseId } };
+  return { ok: true, data: { id: deleted.id } };
+}
+
+/**
+ * True when the expense is part of a closed budget's record.
+ *
+ * Only ever used to produce a clearer message: the repository refuses the write
+ * regardless, under the budget's row lock, so this cannot be raced past.
+ */
+async function expenseBelongsToClosedBudget(
+  userId: string,
+  expenseId: string,
+): Promise<boolean> {
+  const { budgets, expenses } = await loadTrackerData(userId);
+  const expense = expenses.find((entry) => entry.id === expenseId);
+  if (!expense) return false;
+
+  const budget = budgets.find((entry) => entry.id === expense.budgetId);
+  return budget ? isFullySpent(budget) : false;
 }

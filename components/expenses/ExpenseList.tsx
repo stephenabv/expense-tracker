@@ -15,6 +15,7 @@ import { EditExpenseModal } from "@/components/expenses/EditExpenseModal";
 import { ExpenseItem } from "@/components/expenses/ExpenseItem";
 import { formatCurrency } from "@/lib/currency";
 import { formatDateKey } from "@/lib/dates";
+import { isFullySpent } from "@/lib/budgets";
 
 const SORTS: Array<{ value: ExpenseSort; label: string }> = [
   { value: "newest", label: "Newest" },
@@ -59,6 +60,12 @@ export function ExpenseList({ onAddExpense, onCreateBudget }: ExpenseListProps) 
     for (const budget of budgets) map.set(budget.id, budget.name);
     return map;
   }, [budgets]);
+
+  /** Expenses charged to a closed allotment are read-only. */
+  const lockedBudgetIds = useMemo(
+    () => new Set(budgets.filter(isFullySpent).map((budget) => budget.id)),
+    [budgets],
+  );
 
   const filtered = expenseQuery.budgetId !== null;
   const isEmpty = expensePagination.totalItems === 0;
@@ -174,6 +181,7 @@ export function ExpenseList({ onAddExpense, onCreateBudget }: ExpenseListProps) 
               key={expense.id}
               expense={expense}
               budgetName={budgetNames.get(expense.budgetId)}
+              locked={lockedBudgetIds.has(expense.budgetId)}
               onEdit={setEditing}
               onDelete={setPendingDelete}
             />

@@ -181,6 +181,7 @@ export function buildHistory(
         budgetAmount: roundCurrency(budget.amount),
         budgetStartDate: budget.startDate,
         budgetEndDate: budget.endDate,
+        budgetStatus: budget.status,
         startingBalance,
         endingBalance,
         totalExpenses,
@@ -272,6 +273,7 @@ export function summarizeHistory(days: HistoryDay[]): HistorySummary {
         budgetAmount: last.budgetAmount,
         budgetStartDate: last.budgetStartDate,
         budgetEndDate: last.budgetEndDate,
+        budgetStatus: last.budgetStatus,
         totalExpenses: sumAmounts(budgetDays.map((day) => day.totalExpenses)),
         // The balance after the last day of this budget inside the range.
         remaining: last.endingBalance,

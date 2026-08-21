@@ -8,7 +8,7 @@
  * it is safe to run against an existing database.
  */
 
-import { readFileSync } from "node:fs";
+import { readdirSync, readFileSync } from "node:fs";
 import { join } from "node:path";
 import pg from "pg";
 
@@ -21,10 +21,26 @@ if (!connectionString) {
   process.exit(1);
 }
 
-const MIGRATIONS = ["001_init.sql", "002_restrict_api_roles.sql"];
+/*
+ * The directory is the list.
+ *
+ * A hand-maintained array here silently stopped applying new migrations the
+ * moment someone added a file and forgot this line — which is how a schema
+ * change ends up having to be pasted into a database console by hand. The
+ * filenames are numerically prefixed, so sorting them is the apply order.
+ */
+const directory = join(process.cwd(), "db", "migrations");
+const MIGRATIONS = readdirSync(directory)
+  .filter((file) => file.endsWith(".sql"))
+  .sort();
+
+if (MIGRATIONS.length === 0) {
+  console.error(`No migrations found in ${directory}.`);
+  process.exit(1);
+}
 
 const sql = MIGRATIONS.map((file) =>
-  readFileSync(join(process.cwd(), "db", "migrations", file), "utf8"),
+  readFileSync(join(directory, file), "utf8"),
 ).join("\n\n");
 
 const client = new pg.Client({
@@ -47,7 +63,7 @@ try {
       ORDER BY relname`,
   );
 
-  console.log("Schema applied.\n");
+  console.log(`Schema applied (${MIGRATIONS.join(", ")}).\n`);
   for (const row of rows) {
     console.log(
       `  ${row.relrowsecurity ? "\u2713" : "\u2717"} ${row.relname}` +

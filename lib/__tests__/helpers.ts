@@ -27,8 +27,27 @@ export function budget(
     createdAt: "2026-08-01T00:00:00.000Z",
     updatedAt: "2026-08-01T00:00:00.000Z",
     locked: true,
+    // Open unless a test says otherwise; `completedBudget` builds a closed one.
+    status: "active",
+    completedAt: null,
     ...overrides,
   };
+}
+
+/** A budget spent down to exactly ₱0.00 and closed. */
+export function completedBudget(
+  id: string,
+  name: string,
+  amount: number,
+  startDate: string | null,
+  endDate: string | null = startDate,
+  overrides: Partial<Budget> = {},
+): Budget {
+  return budget(id, name, amount, startDate, endDate, {
+    status: "fully_spent",
+    completedAt: "2026-08-10T00:00:00.000Z",
+    ...overrides,
+  });
 }
 
 /** A general allotment: available whatever the expense date. */

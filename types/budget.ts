@@ -21,10 +21,16 @@ import type { DateKey } from "@/lib/dates";
 export type BudgetStatus =
   | "active"
   | "upcoming"
-  | "completed"
+  /** The period has passed. The allotment can still be corrected. */
+  | "period-ended"
   | "over-budget"
   /** A general allotment: available regardless of the date. */
-  | "unrestricted";
+  | "unrestricted"
+  /**
+   * Spent down to exactly ₱0.00 and closed. Outranks every other status: the
+   * budget and its expenses are a historical record from that moment on.
+   */
+  | "fully-spent";
 
 /** How a budget relates to the calendar. */
 export type BudgetApplicability = "single" | "range" | "general";
@@ -48,9 +54,26 @@ export interface Budget {
   /**
    * Amount and dates are read-only until the user explicitly unlocks the budget.
    * Tracked per budget, so unlocking one leaves the others protected.
+   *
+   * A fully spent budget is locked too, but by `status` — that lock cannot be
+   * lifted, and this flag has no say over it.
    */
   locked: boolean;
+  /**
+   * Lifecycle state, stored rather than derived.
+   *
+   * `"fully_spent"` is set once the remaining balance reaches exactly ₱0.00 and
+   * is never cleared: the budget, and every expense charged to it, become an
+   * immutable record. Recomputing this from the numbers would let a later edit
+   * quietly reopen a closed budget, so the transition is written down.
+   */
+  status: BudgetLifecycle;
+  /** When the budget was closed; `null` while it is still active. */
+  completedAt: string | null;
 }
+
+/** The persisted lifecycle state of a budget. Mirrors the `status` column. */
+export type BudgetLifecycle = "active" | "fully_spent";
 
 /** Fields the user supplies when creating or editing a budget. */
 export interface BudgetInput {

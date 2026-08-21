@@ -23,6 +23,43 @@ export interface SqlExecutor {
     text: string,
     params?: unknown[],
   ): Promise<SqlResult<T>>;
+  /**
+   * Runs `fn` against a single connection wrapped in `BEGIN`/`COMMIT`, rolling
+   * back if it throws. Optional so a bare test double stays a valid executor;
+   * use `withTransaction` rather than calling this directly.
+   */
+  transaction?<T>(fn: (tx: SqlExecutor) => Promise<T>): Promise<T>;
+}
+
+/**
+ * Runs `fn` inside one transaction.
+ *
+ * A read that decides whether a write is allowed — "does this budget still have
+ * enough left?" — is only meaningful if the write lands before anyone else can
+ * change the answer. Executors that can hold a connection do the real thing;
+ * anything else falls back to issuing the transaction control statements on the
+ * executor itself, which is correct for a single-connection driver.
+ */
+export async function withTransaction<T>(
+  db: SqlExecutor,
+  fn: (tx: SqlExecutor) => Promise<T>,
+): Promise<T> {
+  if (db.transaction) return db.transaction(fn);
+
+  await db.query("BEGIN");
+  try {
+    const result = await fn(db);
+    await db.query("COMMIT");
+    return result;
+  } catch (error) {
+    // A failed rollback must not mask why the transaction failed.
+    try {
+      await db.query("ROLLBACK");
+    } catch {
+      /* ignore */
+    }
+    throw error;
+  }
 }
 
 /*
@@ -82,12 +119,7 @@ function createEmbeddedDatabase(connectionString: string): SqlExecutor {
   // Created once and shared; every query waits on the same instance.
   const ready = (async () => {
     const pg = await PGlite.create(dataDir ? { dataDir } : undefined);
-    await migrate({
-      query: async (text, params) => {
-        const result = await pg.query(text, params as unknown[]);
-        return { rows: result.rows as never[] };
-      },
-    });
+    await migrate(pgliteExecutor(pg));
     return pg;
   })();
 
@@ -97,6 +129,36 @@ function createEmbeddedDatabase(connectionString: string): SqlExecutor {
       const result = await pg.query(text, params as unknown[]);
       return { rows: result.rows as T[] };
     },
+    transaction: async <T,>(fn: (tx: SqlExecutor) => Promise<T>) => {
+      const pg = await ready;
+      return pgliteExecutor(pg).transaction!(fn);
+    },
+  };
+}
+
+/**
+ * Wraps a PGlite instance as an executor.
+ *
+ * PGlite is one Postgres backend, so two transactions cannot be open at once —
+ * its own `transaction()` serialises them behind a mutex, which is what makes
+ * `SELECT … FOR UPDATE` meaningful here. Shared with the test harness so the
+ * SQL under test runs through the same wrapper as the SQL that ships.
+ */
+export function pgliteExecutor(pg: import("@electric-sql/pglite").PGlite): SqlExecutor {
+  return {
+    query: async <T,>(text: string, params?: unknown[]) => {
+      const result = await pg.query(text, params as unknown[]);
+      return { rows: result.rows as T[] };
+    },
+    transaction: <T,>(fn: (tx: SqlExecutor) => Promise<T>) =>
+      pg.transaction(async (tx) =>
+        fn({
+          query: async <R,>(text: string, params?: unknown[]) => {
+            const result = await tx.query(text, params as unknown[]);
+            return { rows: result.rows as R[] };
+          },
+        }),
+      ) as Promise<T>,
   };
 }
 
@@ -140,6 +202,38 @@ export function getDatabase(): SqlExecutor {
   });
 
   cache.pool = {
+    /*
+     * A transaction needs one connection for its whole life: `BEGIN` on a
+     * pooled socket and `COMMIT` on another would commit nothing. Checking a
+     * client out of the pool pins it, and it is released whichever way the
+     * callback ends. There is no retry here on purpose — replaying a statement
+     * inside an aborted transaction would be worse than failing.
+     */
+    transaction: async <T,>(fn: (tx: SqlExecutor) => Promise<T>) => {
+      const client = await created.connect();
+      const tx: SqlExecutor = {
+        query: async <R,>(text: string, params?: unknown[]) => {
+          const result = await client.query(text, params as never[]);
+          return { rows: result.rows as R[] };
+        },
+      };
+
+      try {
+        await client.query("BEGIN");
+        const result = await fn(tx);
+        await client.query("COMMIT");
+        return result;
+      } catch (error) {
+        try {
+          await client.query("ROLLBACK");
+        } catch {
+          /* the connection is going back to the pool either way */
+        }
+        throw error;
+      } finally {
+        client.release();
+      }
+    },
     query: async <T,>(text: string, params?: unknown[]) => {
       /*
        * Hosted Postgres recycles idle connections, so a pooled socket can be
@@ -188,6 +282,7 @@ export const MIGRATIONS = [
   "001_init.sql",
   "002_restrict_api_roles.sql",
   "003_optional_budget_period.sql",
+  "004_budget_completion.sql",
 ] as const;
 
 /** One migration's SQL. */

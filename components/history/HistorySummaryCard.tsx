@@ -2,7 +2,7 @@
 
 import type { HistorySummary } from "@/types/history";
 import { formatCurrency } from "@/lib/currency";
-import { describeBudgetPeriod } from "@/lib/budgets";
+import { FULLY_SPENT_LABEL, describeBudgetPeriod } from "@/lib/budgets";
 import { cn } from "@/lib/utils";
 
 export interface HistorySummaryCardProps {
@@ -117,6 +117,18 @@ export function HistorySummaryCard({
                     })}
                   </p>
                 </div>
+
+                {/* A closed allotment is still reported — history would
+                    understate what was spent without it — but it is labelled,
+                    because ₱0.00 remaining on its own does not say whether the
+                    budget is finished or merely empty. On its own line, so it
+                    never squeezes the name into an ellipsis. */}
+                {entry.budgetStatus === "fully_spent" ? (
+                  <p className="mt-0.5 text-[0.8125rem] font-medium text-muted-strong">
+                    <span aria-hidden="true">🔒 </span>
+                    {FULLY_SPENT_LABEL}
+                  </p>
+                ) : null}
 
                 <dl className="mt-1 grid grid-cols-3 gap-2 text-[0.8125rem]">
                   <div>

@@ -13,7 +13,7 @@ import type { HistoryDay, HistorySummary } from "@/types/history";
 import { formatCurrency } from "@/lib/currency";
 import { sumAmounts } from "@/lib/calculations";
 import { formatDateKey } from "@/lib/dates";
-import { NO_DATE_PERIOD_LABEL } from "@/lib/budgets";
+import { FULLY_SPENT_LABEL, NO_DATE_PERIOD_LABEL } from "@/lib/budgets";
 import {
   PDF_FONT_BOLD_BASE64,
   PDF_FONT_NAME,
@@ -61,6 +61,19 @@ export function budgetPeriodLabel(entry: {
     return formatDateKey(entry.budgetStartDate);
   }
   return `${formatDateKey(entry.budgetStartDate)} – ${formatDateKey(entry.budgetEndDate)}`;
+}
+
+/**
+ * How a budget's lifecycle is named in the report.
+ *
+ * Completed budgets are printed, never filtered out — a report that dropped
+ * them would understate what was allocated and spent. The column is what keeps
+ * a closed allotment legible next to an open one.
+ */
+export function budgetStatusLabel(entry: {
+  budgetStatus: "active" | "fully_spent";
+}): string {
+  return entry.budgetStatus === "fully_spent" ? FULLY_SPENT_LABEL : "Active";
 }
 
 interface DateGroup {
@@ -304,13 +317,14 @@ export function buildHistoryReport(input: HistoryReportInput): jsPDF {
         right: PAGE_MARGIN,
         bottom: PAGE_MARGIN + FOOTER_HEIGHT,
       },
-      head: [["Budget", "Period", "Allocated", "Spent", "Remaining"]],
+      head: [["Budget", "Period", "Status", "Allocated", "Spent", "Remaining"]],
       // The period column is the budget's own applicability, not the span of
       // its activity: a general allotment says so rather than borrowing the
       // dates of whatever happened to be spent from it.
       body: summary.budgets.map((entry) => [
         entry.budgetName,
         budgetPeriodLabel(entry),
+        budgetStatusLabel(entry),
         formatCurrency(entry.budgetAmount),
         formatCurrency(entry.totalExpenses),
         formatCurrency(entry.remaining),
@@ -335,11 +349,12 @@ export function buildHistoryReport(input: HistoryReportInput): jsPDF {
         lineColor: RULE,
       },
       columnStyles: {
-        0: { cellWidth: contentWidth - 340, fontStyle: "bold" },
+        0: { cellWidth: contentWidth - 404, fontStyle: "bold" },
         1: { cellWidth: 120, textColor: MUTED, fontSize: 8.5 },
-        2: { cellWidth: 72, halign: "right" },
+        2: { cellWidth: 64, textColor: MUTED, fontSize: 8.5 },
         3: { cellWidth: 72, halign: "right" },
-        4: { cellWidth: 76, halign: "right", fontStyle: "bold" },
+        4: { cellWidth: 72, halign: "right" },
+        5: { cellWidth: 76, halign: "right", fontStyle: "bold" },
       },
     });
 
@@ -419,9 +434,14 @@ export function buildHistoryReport(input: HistoryReportInput): jsPDF {
       doc.setFont(PDF_FONT_NAME, "normal");
       doc.setFontSize(8.5);
       doc.setTextColor(MUTED);
-      doc.text(budgetPeriodLabel(day), PAGE_MARGIN + contentWidth, y, {
-        align: "right",
-      });
+      doc.text(
+        day.budgetStatus === "fully_spent"
+          ? `${budgetPeriodLabel(day)} · ${FULLY_SPENT_LABEL}`
+          : budgetPeriodLabel(day),
+        PAGE_MARGIN + contentWidth,
+        y,
+        { align: "right" },
+      );
 
       y += 6;
 
