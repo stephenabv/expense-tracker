@@ -12,7 +12,13 @@
 
 import { revalidatePath } from "next/cache";
 
-import type { Budget, BudgetInput, TransferInput } from "@/types/budget";
+import type {
+  Budget,
+  BudgetInput,
+  BudgetMerge,
+  MergeInput,
+  TransferInput,
+} from "@/types/budget";
 import type { Expense, ExpenseInput } from "@/types/expense";
 import { getUserId } from "@/lib/server/session";
 import type { Page } from "@/lib/pagination";
@@ -28,6 +34,9 @@ import {
   insertBudget,
   insertExpense,
   insertTransfer,
+  listBudgetMerges,
+  listBudgetMergesBetween,
+  mergeBudgets,
   listBudgets,
   loadTrackerData,
   setBudgetLockedRow,
@@ -38,6 +47,7 @@ import {
 import {
   validateBudgetForm,
   validateExpenseForm,
+  validateMergeForm,
   validateTransferForm,
 } from "@/lib/validation";
 import {
@@ -45,7 +55,9 @@ import {
   budgetApplicability,
   budgetsForDate,
   expensesOutsidePeriod,
+  isClosed,
   isFullySpent,
+  isMerged,
   isPeriodEnded,
   isTransferred,
 } from "@/lib/budgets";
@@ -87,14 +99,28 @@ const TRANSFER_BUDGET_ERROR =
 const TRANSFER_SOURCE_ERROR =
   "This budget funded another allotment. Deleting it would leave that allotment with no source.";
 
+/*
+ * A merged allotment is finished with, but not because it was spent.
+ *
+ * Saying "fully spent" here would be simply untrue — the money went into
+ * another budget and is still there — so the two closed states never share a
+ * message.
+ */
+const MERGED_BUDGET_ERROR =
+  "This allotment was merged into another one. Its expenses live there now, so it can no longer be changed.";
+const MERGED_EXPENSE_ERROR =
+  "This expense belongs to an allotment that was merged into another one.";
+
 function refusal(
   reason: WriteRefusal,
   remaining: number | undefined,
   missing: string,
   lockedError: string,
   transferError = TRANSFER_EXPENSE_ERROR,
+  mergedError = MERGED_BUDGET_ERROR,
 ): { ok: false; error: string } {
   if (reason === "locked") return { ok: false, error: lockedError };
+  if (reason === "merged") return { ok: false, error: mergedError };
   if (reason === "transfer") return { ok: false, error: transferError };
   if (reason === "has-transfers") {
     return { ok: false, error: TRANSFER_SOURCE_ERROR };
@@ -173,17 +199,24 @@ export async function budgetTotalsAction(): Promise<ActionResult<BudgetTotal[]>>
 export async function loadHistoryAction(
   query: Omit<ExpenseQuery, "page" | "pageSize"> = {},
 ): Promise<
-  ActionResult<{ expenses: Expense[]; spentBefore: Array<[string, number]> }>
+  ActionResult<{
+    expenses: Expense[];
+    spentBefore: Array<[string, number]>;
+    merges: BudgetMerge[];
+  }>
 > {
   if (!isDatabaseConfigured()) return NOT_CONFIGURED;
   const userId = await getUserId();
   if (!userId) return UNAUTHENTICATED;
 
-  const [expenses, before] = await Promise.all([
+  const [expenses, before, merges] = await Promise.all([
     listExpensesMatching(userId, query),
     query.from
       ? budgetTotalsBefore(userId, query.from)
       : Promise.resolve([]),
+    // Merges are fetched alongside because they belong in the same report but
+    // are not expenses — nothing was spent, so they cannot ride in the days.
+    listBudgetMergesBetween(userId, query.from ?? null, query.to ?? null),
   ]);
 
   return {
@@ -191,6 +224,7 @@ export async function loadHistoryAction(
     data: {
       expenses,
       spentBefore: before.map((entry) => [entry.budgetId, entry.totalExpenses]),
+      merges,
     },
   };
 }
@@ -242,6 +276,11 @@ export async function updateBudgetAction(
   // exception. Re-checked in SQL as well; this is only here to say why.
   if (isFullySpent(target)) {
     return { ok: false, error: LOCKED_BUDGET_ERROR };
+  }
+
+  // A merged one is equally final, and for a reason worth stating separately.
+  if (isMerged(target)) {
+    return { ok: false, error: MERGED_BUDGET_ERROR };
   }
 
   // A transferred allotment's amount is the transfer that paid for it, so the
@@ -379,6 +418,9 @@ async function validateExpenseAgainstServer(
   if (named && isFullySpent(named)) {
     return { ok: false, error: LOCKED_BUDGET_ERROR };
   }
+  if (named && isMerged(named)) {
+    return { ok: false, error: MERGED_BUDGET_ERROR };
+  }
 
   const eligible = budgetsForDate(budgets, input.expenseDate);
 
@@ -512,6 +554,92 @@ export async function deleteExpenseAction(
   return { ok: true, data: { id: deleted.id } };
 }
 
+/** Every merge this account has performed, newest first. */
+export async function listBudgetMergesAction(): Promise<ActionResult<BudgetMerge[]>> {
+  if (!isDatabaseConfigured()) return NOT_CONFIGURED;
+  const userId = await getUserId();
+  if (!userId) return UNAUTHENTICATED;
+
+  return { ok: true, data: await listBudgetMerges(userId) };
+}
+
+/** What a merge returns: the allotment created and the two it replaced. */
+export interface MergeWrite {
+  merged: Budget;
+  sources: Budget[];
+}
+
+/**
+ * Folds two allotments into one.
+ *
+ * Both ids are resolved against the *caller's own* budgets before anything
+ * else, so a crafted request naming someone else's allotment finds nothing to
+ * merge. The repository then re-checks eligibility under both row locks and
+ * does the whole thing in one transaction, which is also what makes a
+ * double-submitted merge harmless: the second request finds the sources
+ * already folded in and is refused.
+ */
+export async function mergeBudgetsAction(
+  input: MergeInput,
+): Promise<ActionResult<MergeWrite>> {
+  if (!isDatabaseConfigured()) return NOT_CONFIGURED;
+  const userId = await getUserId();
+  if (!userId) return UNAUTHENTICATED;
+
+  const budgets = await listBudgets(userId);
+
+  // Named but not eligible: say which rule stopped it, rather than letting it
+  // fail below as "no longer available", which explains nothing.
+  for (const id of input.sourceBudgetIds) {
+    const named = budgets.find((budget) => budget.id === id);
+    if (!named) continue;
+    if (isFullySpent(named)) {
+      return {
+        ok: false,
+        error: `${named.name} is ${FULLY_SPENT_LABEL} and locked. A merge would move its expenses out, so it cannot be merged.`,
+      };
+    }
+    if (isMerged(named)) {
+      return {
+        ok: false,
+        error: `${named.name} has already been merged into another allotment.`,
+      };
+    }
+  }
+
+  const result = validateMergeForm(
+    input.name,
+    input.sourceBudgetIds,
+    // Only open allotments this account owns are eligible, so an id belonging
+    // to someone else is simply absent from the list.
+    budgets.filter((budget) => !isClosed(budget)),
+  );
+
+  if (!result.ok) {
+    return { ok: false, error: result.errors.sources ?? result.errors.name! };
+  }
+
+  const written = await mergeBudgets(userId, {
+    sourceBudgetIds: result.values!.sourceBudgetIds,
+    name: result.values!.name,
+  });
+
+  if (!written.ok) {
+    return refusal(
+      written.reason,
+      written.remaining,
+      "Budget not found.",
+      LOCKED_BUDGET_ERROR,
+    );
+  }
+
+  refresh();
+  return {
+    ok: true,
+    data: { merged: written.merged, sources: written.sources },
+  };
+}
+
 /**
  * What a transfer write returns.
  *
@@ -549,6 +677,9 @@ export async function createTransferAction(
   const named = budgets.find((budget) => budget.id === input.sourceBudgetId);
   if (named && isFullySpent(named)) {
     return { ok: false, error: LOCKED_BUDGET_ERROR };
+  }
+  if (named && isMerged(named)) {
+    return { ok: false, error: MERGED_BUDGET_ERROR };
   }
 
   const eligible = budgetsForDate(budgets, input.expenseDate);
@@ -630,5 +761,8 @@ async function transactionWriteBlock(
   if (expense.kind === "transfer") return TRANSFER_EXPENSE_ERROR;
 
   const budget = budgets.find((entry) => entry.id === expense.budgetId);
-  return budget && isFullySpent(budget) ? LOCKED_EXPENSE_ERROR : null;
+  if (!budget) return null;
+  if (isFullySpent(budget)) return LOCKED_EXPENSE_ERROR;
+  if (isMerged(budget)) return MERGED_EXPENSE_ERROR;
+  return null;
 }

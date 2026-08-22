@@ -9,13 +9,15 @@
 import { jsPDF } from "jspdf";
 import autoTable from "jspdf-autotable";
 
-import type { HistoryDay, HistorySummary } from "@/types/history";
+import type { HistoryDay, HistoryMerge, HistorySummary } from "@/types/history";
 import { formatCurrency } from "@/lib/currency";
 import { sumAmounts } from "@/lib/calculations";
 import { formatDateKey } from "@/lib/dates";
+import type { BudgetLifecycle } from "@/types/budget";
 import {
   ALLOCATION_LABELS,
   FULLY_SPENT_LABEL,
+  MERGED_LABEL,
   NO_DATE_PERIOD_LABEL,
   TRANSFER_ROW_LABEL,
 } from "@/lib/budgets";
@@ -36,6 +38,14 @@ export interface HistoryReportInput {
   /** Days to include, in the order they should be printed (newest first). */
   days: HistoryDay[];
   summary: HistorySummary;
+  /**
+   * Merges that happened inside the selected period.
+   *
+   * Reported in a section of their own. A merge moved no money and bought
+   * nothing, so putting it among the expenses would overstate spending by the
+   * whole allotment.
+   */
+  merges?: HistoryMerge[];
   /** Human label for the active filter, e.g. `August 1 – August 17, 2026`. */
   periodLabel: string;
   /**
@@ -76,9 +86,11 @@ export function budgetPeriodLabel(entry: {
  * a closed allotment legible next to an open one.
  */
 export function budgetStatusLabel(entry: {
-  budgetStatus: "active" | "fully_spent";
+  budgetStatus: BudgetLifecycle;
 }): string {
-  return entry.budgetStatus === "fully_spent" ? FULLY_SPENT_LABEL : "Active";
+  if (entry.budgetStatus === "fully_spent") return FULLY_SPENT_LABEL;
+  if (entry.budgetStatus === "merged") return MERGED_LABEL;
+  return "Active";
 }
 
 /**
@@ -141,6 +153,55 @@ export function columnWidths(
     3: { cellWidth: rest[2], halign: "right" },
     4: { cellWidth: rest[3], halign: "right" },
     5: { cellWidth: rest[4], halign: "right", fontStyle: "bold" },
+  };
+}
+
+/**
+ * One merge as report rows: each source indented under the result.
+ *
+ * The sources are labelled rather than merely listed, because a column of
+ * amounts that add up to the row below invites being read as four separate
+ * allotments when it is really two becoming one.
+ */
+export function mergeReportRows(merge: HistoryMerge): string[][] {
+  const date = formatDateKey(merge.date);
+
+  const sources = merge.sources.map((source, index) => [
+    index === 0 ? date : "",
+    `From: ${source.sourceName}`,
+    formatCurrency(source.amount),
+    formatCurrency(source.totalExpenses),
+    formatCurrency(source.remaining),
+  ]);
+
+  return [
+    ...sources,
+    [
+      "",
+      `Merged into: ${merge.mergedBudgetName}`,
+      formatCurrency(merge.totalAmount),
+      formatCurrency(merge.totalExpenses),
+      formatCurrency(merge.totalRemaining),
+    ],
+  ];
+}
+
+/** Column widths for the merge table, summing to the page exactly. */
+export function mergeColumnWidths(
+  contentWidth: number,
+): Record<number, { cellWidth: number; halign?: "right"; fontSize?: number }> {
+  const share = (fraction: number) => Math.floor(contentWidth * fraction);
+  // The allotment column absorbs the remainder: it holds the longest text, and
+  // the rest have to sum to the page exactly or autoTable reports an overrun.
+  const fixed = [share(0.15), share(0.16), share(0.21), share(0.16)];
+  const name = contentWidth - fixed.reduce((sum, width) => sum + width, 0);
+
+  return {
+    0: { cellWidth: fixed[0], fontSize: 8.5 },
+    1: { cellWidth: name, fontSize: 8.5 },
+    2: { cellWidth: fixed[1], halign: "right", fontSize: 8.5 },
+    3: { cellWidth: fixed[2], halign: "right", fontSize: 8.5 },
+    4: { cellWidth: fixed[3], halign: "right", fontSize: 8.5 },
   };
 }
 
@@ -326,6 +387,7 @@ export function allocationLabel(entry: {
  */
 export function buildHistoryReport(input: HistoryReportInput): jsPDF {
   const { days, summary, periodLabel } = input;
+  const merges = input.merges ?? [];
   const budgetLabel = input.budgetLabel ?? null;
   const generatedAt = input.generatedAt ?? new Date();
 
@@ -489,6 +551,71 @@ export function buildHistoryReport(input: HistoryReportInput): jsPDF {
     const summaryY = (doc as unknown as { lastAutoTable?: { finalY: number } })
       .lastAutoTable?.finalY;
     y = typeof summaryY === "number" ? summaryY + 6 : y + 40;
+  }
+
+  // ---- Budget merges ------------------------------------------------------
+  /*
+   * A structural section, deliberately before the expenses and outside them.
+   *
+   * The figures here are allocations being combined, not money spent; the
+   * report says so in as many words so the two can never be added together by
+   * a reader skimming the totals.
+   */
+  if (merges.length > 0) {
+    y += 6;
+    horizontalRule(doc, y, contentWidth);
+
+    y += 22;
+    doc.setFont(PDF_FONT_NAME, "bold");
+    doc.setFontSize(9);
+    doc.setTextColor(MUTED);
+    doc.text("BUDGET MERGES", PAGE_MARGIN, y);
+
+    y += 14;
+    doc.setFont(PDF_FONT_NAME, "normal");
+    doc.setFontSize(8.5);
+    doc.text(
+      "Allotments combined. Not an expense — no money was spent.",
+      PAGE_MARGIN,
+      y,
+    );
+    y += 8;
+
+    autoTable(doc, {
+      startY: y,
+      margin: {
+        top: PAGE_MARGIN,
+        left: PAGE_MARGIN,
+        right: PAGE_MARGIN,
+        bottom: PAGE_MARGIN + FOOTER_HEIGHT,
+      },
+      head: [["Date", "Allotment", "Allocated", "Existing Expenses", "Remaining"]],
+      body: merges.flatMap((merge) => mergeReportRows(merge)),
+      showHead: "everyPage",
+      rowPageBreak: "avoid",
+      theme: "plain",
+      styles: {
+        font: PDF_FONT_NAME,
+        fontSize: 9,
+        cellPadding: { top: 5, right: 6, bottom: 5, left: 0 },
+        textColor: INK,
+        overflow: "linebreak",
+        valign: "top",
+      },
+      headStyles: {
+        font: PDF_FONT_NAME,
+        fontStyle: "normal",
+        fontSize: 8,
+        textColor: MUTED,
+        lineWidth: { bottom: 0.75 },
+        lineColor: RULE,
+      },
+      columnStyles: mergeColumnWidths(contentWidth),
+    });
+
+    const mergeY = (doc as unknown as { lastAutoTable?: { finalY: number } })
+      .lastAutoTable?.finalY;
+    y = typeof mergeY === "number" ? mergeY + 6 : y + 40;
   }
 
   y += 6;

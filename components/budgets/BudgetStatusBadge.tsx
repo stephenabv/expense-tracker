@@ -14,6 +14,9 @@ const TONES: Record<BudgetStatus, string> = {
   // Closed, not failed: a budget spent exactly to zero did what it was for, so
   // it reads as settled rather than as a warning.
   "fully-spent": "bg-foreground text-background",
+  // Folded away rather than finished — quieter than fully spent, because
+  // nothing was actually spent.
+  merged: "bg-surface-muted text-muted-strong ring-1 ring-inset ring-border-strong",
 };
 
 /** Compact status pill shared by every budget surface. */
@@ -33,6 +36,7 @@ export function BudgetStatusBadge({
       )}
     >
       {status === "fully-spent" ? <span aria-hidden="true" className="mr-1">🔒</span> : null}
+      {status === "merged" ? <span aria-hidden="true" className="mr-1">⇢</span> : null}
       {STATUS_LABELS[status]}
     </span>
   );

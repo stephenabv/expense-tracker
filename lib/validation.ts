@@ -171,6 +171,58 @@ export function validateBudgetForm(
   };
 }
 
+/* ------------------------------------------------------------------ merges */
+
+export interface MergeFormErrors {
+  name?: string;
+  sources?: string;
+}
+
+export interface MergeFormResult {
+  ok: boolean;
+  values?: { name: string; sourceBudgetIds: [string, string] };
+  errors: MergeFormErrors;
+}
+
+/**
+ * Validates a budget merge.
+ *
+ * Only the name is checked, because only the name is the user's to give. The
+ * amount and the period are derived from the two sources — a merge that let
+ * either be typed in could quietly change how much money exists, which is the
+ * one thing a merge must never do.
+ */
+export function validateMergeForm(
+  name: string,
+  sourceBudgetIds: string[],
+  eligible: Budget[],
+): MergeFormResult {
+  const errors: MergeFormErrors = {};
+
+  const chosen = sourceBudgetIds.filter((id) => id.trim() !== "");
+  const unique = [...new Set(chosen)];
+
+  if (unique.length !== 2) {
+    errors.sources = "Choose exactly two budget allotments to merge.";
+  } else if (!unique.every((id) => eligible.some((budget) => budget.id === id))) {
+    errors.sources = "One of those allotments is no longer available to merge.";
+  }
+
+  const nameResult = validateBudgetName(name);
+  if (!nameResult.ok) errors.name = nameResult.error;
+
+  if (errors.name || errors.sources) return { ok: false, errors };
+
+  return {
+    ok: true,
+    values: {
+      name: nameResult.value!,
+      sourceBudgetIds: [unique[0], unique[1]],
+    },
+    errors,
+  };
+}
+
 /* ---------------------------------------------------------------- transfers */
 
 export interface TransferFormErrors {

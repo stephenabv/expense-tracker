@@ -15,11 +15,15 @@ import {
   expensesOutsidePeriod,
   findOverlaps,
   isPeriodEnded,
+  statusFor,
+  summarizeBudgetFromTotals,
   orphanedExpenses,
   resolveBudgetForDate,
   sortBudgetsByPeriod,
   summarizeBudget,
 } from "@/lib/budgets";
+import type { Budget } from "@/types/budget";
+import type { Expense } from "@/types/expense";
 import { budget, expense, generalBudget } from "./helpers";
 
 const NOW = new Date(2026, 7, 6, 12, 0); // 6 August 2026
@@ -365,4 +369,68 @@ describe("sortBudgetsByPeriod", () => {
     sortBudgetsByPeriod(input);
     expect(input[0].id).toBe("b1");
   });
+});
+
+describe("the status ladder has one home", () => {
+  /*
+   * A budget can be summarised from its expense rows or from the totals SQL
+   * computed, and the two once carried a copy of the ladder each. Adding a new
+   * lifecycle state to one and not the other put merged allotments back under
+   * the calendar rules, where they showed as "Period ended" on every card.
+   */
+  const cases: Array<[string, Budget, Expense[]]> = [
+    ["an open general allotment", generalBudget("s1", "Open", 1_000), []],
+    [
+      "an ended period",
+      budget("s2", "Ended", 1_000, "2026-08-01", "2026-08-05"),
+      [],
+    ],
+    [
+      "an upcoming period",
+      budget("s3", "Upcoming", 1_000, "2026-09-01", "2026-09-05"),
+      [],
+    ],
+    [
+      "an overspent allotment",
+      generalBudget("s4", "Overspent", 100),
+      [expense("x1", "s4", "Too much", 500, "2026-08-06")],
+    ],
+    [
+      "a fully spent allotment",
+      generalBudget("s5", "Closed", 100, { status: "fully_spent", completedAt: "2026-08-06T00:00:00.000Z" }),
+      [expense("x2", "s5", "All of it", 100, "2026-08-06")],
+    ],
+    [
+      "a merged allotment",
+      generalBudget("s6", "Folded", 1_000, {
+        status: "merged",
+        mergedIntoBudgetId: "s1",
+        mergedAt: "2026-08-06T00:00:00.000Z",
+      }),
+      [],
+    ],
+  ];
+
+  for (const [label, entry, charged] of cases) {
+    it(`agrees on ${label}`, () => {
+      const fromRows = summarizeBudget(entry, charged, NOW).status;
+      const spent = charged
+        .filter((e) => e.budgetId === entry.id)
+        .reduce((sum, e) => sum + e.amount, 0);
+      const fromTotals = summarizeBudgetFromTotals(
+        entry,
+        {
+          budgetId: entry.id,
+          totalExpenses: spent,
+          totalTransferred: 0,
+          expenseCount: charged.length,
+          transferCount: 0,
+        },
+        NOW,
+      ).status;
+
+      expect(fromTotals).toBe(fromRows);
+      expect(statusFor(entry, entry.amount - spent, NOW)).toBe(fromRows);
+    });
+  }
 });

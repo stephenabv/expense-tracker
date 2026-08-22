@@ -26,6 +26,9 @@ import {
 } from "@/lib/history";
 import { sortBudgetsByPeriod } from "@/lib/budgets";
 import { DEFAULT_PAGE_SIZE, paginationFor } from "@/lib/pagination";
+import type { BudgetMerge } from "@/types/budget";
+import type { HistoryMerge } from "@/types/history";
+import { HistoryMergeCard } from "@/components/history/HistoryMergeCard";
 import { loadHistoryAction } from "@/lib/server/tracker-actions";
 
 /** The dates a filter covers, as the query understands them. */
@@ -96,6 +99,7 @@ export function HistoryView() {
   const [filter, setFilter] = useState<HistoryFilter>({ mode: "all" });
   const [expenses, setExpenses] = useState<Expense[]>([]);
   const [spentBefore, setSpentBefore] = useState<Map<string, number>>(new Map());
+  const [merges, setMerges] = useState<BudgetMerge[]>([]);
   const [loading, setLoading] = useState(true);
   const [page, setPage] = useState(1);
   const [pageSize, setPageSize] = useState<number>(DEFAULT_PAGE_SIZE);
@@ -118,6 +122,7 @@ export function HistoryView() {
       if (result.ok) {
         setExpenses(result.data.expenses);
         setSpentBefore(new Map(result.data.spentBefore));
+        setMerges(result.data.merges);
       }
     } finally {
       if (request === requestRef.current) setLoading(false);
@@ -137,6 +142,33 @@ export function HistoryView() {
   );
 
   const days = useMemo(() => filterHistory(history, filter), [history, filter]);
+
+  /*
+   * Merges that belong in this report.
+   *
+   * Narrowing to one allotment narrows these too: a merge is shown when the
+   * chosen budget was either produced by it or folded into it, so filtering to
+   * an unrelated budget does not sprinkle other budgets' merges through the
+   * results.
+   */
+  const historyMerges = useMemo<HistoryMerge[]>(() => {
+    const selected = filter.budgetId ?? null;
+
+    return merges
+      .filter(
+        (merge) =>
+          selected === null ||
+          merge.mergedBudgetId === selected ||
+          merge.sources.some((source) => source.sourceBudgetId === selected),
+      )
+      .map((merge) => ({
+        ...merge,
+        mergedBudgetName:
+          budgets.find((budget) => budget.id === merge.mergedBudgetId)?.name ??
+          "Merged allotment",
+        date: merge.mergedAt.slice(0, 10),
+      }));
+  }, [merges, filter.budgetId, budgets]);
   const summary = useMemo(() => summarizeHistory(days), [days]);
   const periodLabel = useMemo(() => describeFilter(filter), [filter]);
 
@@ -186,7 +218,7 @@ export function HistoryView() {
               ))}
             </div>
           </SkeletonRegion>
-        ) : days.length === 0 ? (
+        ) : days.length === 0 && historyMerges.length === 0 ? (
           <EmptyHistory
             label={periodLabel}
             filtered={isFiltered}
@@ -208,12 +240,20 @@ export function HistoryView() {
               <ExportPdfButton
                 days={days}
                 summary={summary}
+                merges={historyMerges}
                 periodLabel={resolvedLabel}
                 budgetLabel={budgetLabel}
               />
             </div>
 
             <div className="space-y-3">
+              {/* Merges lead the breakdown rather than being interleaved with
+                  the days: they are structural events, and a reader scanning
+                  for spending should not have to sort them out of it. */}
+              {historyMerges.map((merge) => (
+                <HistoryMergeCard key={merge.mergedBudgetId} merge={merge} />
+              ))}
+
               {visible.map((day, index) => (
                 <div
                   key={`${day.date}-${day.budgetId}`}

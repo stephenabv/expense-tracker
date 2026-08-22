@@ -16,6 +16,9 @@ import type {
   BudgetAllocation,
   BudgetInput,
   BudgetLifecycle,
+  BudgetMerge,
+  BudgetMergeSource,
+  MergeInput,
   TransferInput,
 } from "@/types/budget";
 import type { Expense, ExpenseInput, ExpenseKind } from "@/types/expense";
@@ -43,6 +46,9 @@ interface BudgetRow {
   allocation_type: BudgetAllocation;
   source_budget_id: string | null;
   source_transaction_id: string | null;
+  funded_amount_centavos: string | number;
+  merged_into_budget_id: string | null;
+  merged_at: Date | string | null;
   created_at: Date | string;
   updated_at: Date | string;
 }
@@ -83,6 +89,9 @@ function toBudget(row: BudgetRow): Budget {
     allocationType: row.allocation_type,
     sourceBudgetId: row.source_budget_id,
     sourceTransactionId: row.source_transaction_id,
+    fundedAmount: fromCentavos(row.funded_amount_centavos),
+    mergedIntoBudgetId: row.merged_into_budget_id,
+    mergedAt: row.merged_at === null ? null : iso(row.merged_at),
     createdAt: iso(row.created_at),
     updatedAt: iso(row.updated_at),
   };
@@ -104,7 +113,8 @@ function toExpense(row: ExpenseRow): Expense {
 
 const BUDGET_COLUMNS =
   "id, name, amount_centavos, start_date, end_date, locked, status, completed_at, " +
-  "allocation_type, source_budget_id, source_transaction_id, created_at, updated_at";
+  "allocation_type, source_budget_id, source_transaction_id, funded_amount_centavos, " +
+  "merged_into_budget_id, merged_at, created_at, updated_at";
 
 const EXPENSE_COLUMNS =
   "id, budget_id, name, amount_centavos, expense_date, kind, created_at, updated_at";
@@ -143,8 +153,11 @@ export async function insertBudget(
   db: SqlExecutor = getDatabase(),
 ): Promise<Budget> {
   const { rows } = await db.query<BudgetRow>(
-    `INSERT INTO budgets (id, user_id, name, amount_centavos, start_date, end_date, locked)
-     VALUES ($1, $2, $3, $4, $5, $6, true)
+    // A directly created allotment is entirely the user's own money, so its
+    // funded figure is its whole amount.
+    `INSERT INTO budgets (id, user_id, name, amount_centavos, start_date, end_date,
+                          locked, funded_amount_centavos)
+     VALUES ($1, $2, $3, $4, $5, $6, true, $4)
      RETURNING ${BUDGET_COLUMNS}`,
     [
       randomUUID(),
@@ -189,7 +202,12 @@ export type WriteRefusal =
    */
   | "transfer"
   /** The budget funded another allotment, so deleting it would strand it. */
-  | "has-transfers";
+  | "has-transfers"
+  /**
+   * The budget was folded into another one. Its expenses live there now, so
+   * changing it here would rewrite a record of what it held.
+   */
+  | "merged";
 
 export type WriteResult<T> =
   | ({ ok: true } & T)
@@ -200,6 +218,19 @@ interface LockedBudget {
   amount_centavos: string | number;
   status: BudgetLifecycle;
   allocation_type: BudgetAllocation;
+}
+
+/**
+ * Why this budget cannot be written to, or `null` if it can.
+ *
+ * Both closed states refuse every write, and both are permanent — but they are
+ * not the same fact, and a caller that conflated them would tell someone their
+ * allotment was spent out when it had actually been folded into another one.
+ */
+function closedRefusal(budget: { status: BudgetLifecycle }): WriteRefusal | null {
+  if (budget.status === "fully_spent") return "locked";
+  if (budget.status === "merged") return "merged";
+  return null;
 }
 
 /**
@@ -276,7 +307,8 @@ async function settleBudget(
 
   const row = rows[0];
   if (!row) return null;
-  if (row.status === "fully_spent") return toBudget(row);
+  // Both closed states are final; neither is ever recomputed back open.
+  if (row.status !== "active") return toBudget(row);
 
   // Transfers count here as well as expenses: the money left the budget either
   // way, so moving the last peso out closes it exactly as spending it would.
@@ -309,9 +341,8 @@ export async function updateBudgetRow(
   return withTransaction(db, async (tx) => {
     const locked = await lockBudget(tx, userId, budgetId);
     if (!locked) return { ok: false as const, reason: "not-found" as const };
-    if (locked.status === "fully_spent") {
-      return { ok: false as const, reason: "locked" as const };
-    }
+    const refused = closedRefusal(locked);
+    if (refused) return { ok: false as const, reason: refused };
 
     /*
      * A transferred allotment's amount is the transfer that funded it.
@@ -329,8 +360,21 @@ export async function updateBudgetRow(
     }
 
     await tx.query(
+      /*
+       * The funded figure moves with the amount, but only by what the user
+       * actually put in. Raising a merged allotment adds new money; raising a
+       * transferred one does not, because its funding still came from its
+       * source. `LEAST` keeps the figure inside the amount when it shrinks.
+       */
       `UPDATE budgets
           SET name = $3, amount_centavos = $4, start_date = $5, end_date = $6,
+              funded_amount_centavos = LEAST(
+                CASE WHEN allocation_type = 'transferred'
+                     THEN funded_amount_centavos
+                     ELSE funded_amount_centavos + ($4 - amount_centavos)
+                END,
+                $4
+              ),
               locked = true, updated_at = now()
         WHERE id = $2 AND user_id = $1 AND status = 'active'`,
       [
@@ -391,11 +435,19 @@ export async function deleteBudgetRow(
   return withTransaction(db, async (tx) => {
     const locked = await lockBudget(tx, userId, budgetId);
     if (!locked) return { ok: false as const, reason: "not-found" as const };
-    if (locked.status === "fully_spent") {
-      return { ok: false as const, reason: "locked" as const };
-    }
+    const refused = closedRefusal(locked);
+    if (refused) return { ok: false as const, reason: refused };
     if (locked.allocation_type === "transferred") {
       return { ok: false as const, reason: "transfer" as const };
+    }
+
+    const { rows: absorbed } = await tx.query<{ id: string }>(
+      `SELECT id FROM budgets WHERE merged_into_budget_id = $1 LIMIT 1`,
+      [budgetId],
+    );
+    if (absorbed.length > 0) {
+      // Deleting it would leave the allotments it absorbed pointing nowhere.
+      return { ok: false as const, reason: "merged" as const };
     }
 
     const { rows: funded } = await tx.query<{ id: string }>(
@@ -434,7 +486,7 @@ async function refusalFor(
     [budgetId, userId],
   );
   if (!rows[0]) return "not-found";
-  return rows[0].status === "fully_spent" ? "locked" : "not-found";
+  return closedRefusal(rows[0]) ?? "not-found";
 }
 
 /* ---------------------------------------------------------------- expenses */
@@ -472,9 +524,8 @@ export async function insertExpense(
     // an allotment the caller does not own.
     const budget = await lockBudget(tx, userId, input.budgetId);
     if (!budget) return { ok: false as const, reason: "not-found" as const };
-    if (budget.status === "fully_spent") {
-      return { ok: false as const, reason: "locked" as const };
-    }
+    const refused = closedRefusal(budget);
+    if (refused) return { ok: false as const, reason: refused };
 
     const remaining = Number(budget.amount_centavos) - (await spentOn(tx, budget.id));
     if (amount > remaining) {
@@ -546,9 +597,8 @@ export async function updateExpenseRow(
     for (const id of ids) {
       const row = await lockBudget(tx, userId, id);
       if (!row) return { ok: false as const, reason: "not-found" as const };
-      if (row.status === "fully_spent") {
-        return { ok: false as const, reason: "locked" as const };
-      }
+      const refused = closedRefusal(row);
+      if (refused) return { ok: false as const, reason: refused };
       locks.set(id, row);
     }
 
@@ -611,9 +661,8 @@ export async function deleteExpenseRow(
 
     const budget = await lockBudget(tx, userId, current[0].budget_id);
     if (!budget) return { ok: false as const, reason: "not-found" as const };
-    if (budget.status === "fully_spent") {
-      return { ok: false as const, reason: "locked" as const };
-    }
+    const refused = closedRefusal(budget);
+    if (refused) return { ok: false as const, reason: refused };
 
     const { rows } = await tx.query<{ id: string }>(
       `DELETE FROM expenses WHERE id = $2 AND user_id = $1 RETURNING id`,
@@ -654,9 +703,8 @@ export async function insertTransfer(
     // Another account's budget is simply not found; the caller learns nothing
     // about whether it exists.
     if (!source) return { ok: false as const, reason: "not-found" as const };
-    if (source.status === "fully_spent") {
-      return { ok: false as const, reason: "locked" as const };
-    }
+    const refused = closedRefusal(source);
+    if (refused) return { ok: false as const, reason: refused };
 
     const remaining = Number(source.amount_centavos) - (await spentOn(tx, source.id));
     if (amount > remaining) {
@@ -679,10 +727,13 @@ export async function insertTransfer(
 
     const destinationId = randomUUID();
     const { rows: created } = await tx.query<BudgetRow>(
+      // Funded at zero: this allotment's money was already counted in the
+      // budget it came out of, and counting it again would invent it.
       `INSERT INTO budgets
          (id, user_id, name, amount_centavos, start_date, end_date, locked,
-          allocation_type, source_budget_id, source_transaction_id)
-       VALUES ($1, $2, $3, $4, $5, $6, true, 'transferred', $7, $8)
+          allocation_type, source_budget_id, source_transaction_id,
+          funded_amount_centavos)
+       VALUES ($1, $2, $3, $4, $5, $6, true, 'transferred', $7, $8, 0)
        RETURNING ${BUDGET_COLUMNS}`,
       [
         destinationId,
@@ -706,6 +757,298 @@ export async function insertTransfer(
       transfer: { ...toExpense(recorded[0]), transferBudgetId: destinationId },
       source: settled,
       destination: toBudget(created[0]),
+    };
+  });
+}
+
+/* ------------------------------------------------------------------ merges */
+
+interface MergeRow {
+  merged_budget_id: string;
+  merged_at: Date | string;
+  source_budget_id: string;
+  source_name: string;
+  amount_centavos: string | number;
+  expense_centavos: string | number;
+  transfer_centavos: string | number;
+}
+
+function toMergeSource(row: MergeRow): BudgetMergeSource {
+  const amount = fromCentavos(row.amount_centavos);
+  const totalExpenses = fromCentavos(row.expense_centavos);
+  const totalTransferred = fromCentavos(row.transfer_centavos);
+
+  return {
+    sourceBudgetId: row.source_budget_id,
+    sourceName: row.source_name,
+    amount,
+    totalExpenses,
+    totalTransferred,
+    remaining: roundCurrency(amount - totalExpenses - totalTransferred),
+  };
+}
+
+/** Groups the stored rows into one entry per merge, newest first. */
+function toMerges(rows: MergeRow[]): BudgetMerge[] {
+  const byBudget = new Map<string, BudgetMerge>();
+
+  for (const row of rows) {
+    const source = toMergeSource(row);
+    let merge = byBudget.get(row.merged_budget_id);
+
+    if (!merge) {
+      merge = {
+        mergedBudgetId: row.merged_budget_id,
+        mergedAt: iso(row.merged_at),
+        sources: [],
+        totalAmount: 0,
+        totalExpenses: 0,
+        totalTransferred: 0,
+        totalRemaining: 0,
+      };
+      byBudget.set(row.merged_budget_id, merge);
+    }
+
+    merge.sources.push(source);
+    merge.totalAmount = roundCurrency(merge.totalAmount + source.amount);
+    merge.totalExpenses = roundCurrency(merge.totalExpenses + source.totalExpenses);
+    merge.totalTransferred = roundCurrency(
+      merge.totalTransferred + source.totalTransferred,
+    );
+    merge.totalRemaining = roundCurrency(merge.totalRemaining + source.remaining);
+  }
+
+  return [...byBudget.values()];
+}
+
+const MERGE_COLUMNS =
+  "merged_budget_id, merged_at, source_budget_id, source_name, " +
+  "amount_centavos, expense_centavos, transfer_centavos";
+
+/** Every merge this account has performed, newest first. */
+export async function listBudgetMerges(
+  userId: string,
+  db: SqlExecutor = getDatabase(),
+): Promise<BudgetMerge[]> {
+  const { rows } = await db.query<MergeRow>(
+    `SELECT ${MERGE_COLUMNS} FROM budget_merges
+      WHERE user_id = $1
+      ORDER BY merged_at DESC, merged_budget_id, source_name`,
+    [userId],
+  );
+  return toMerges(rows);
+}
+
+/** Merges whose date falls inside a window, for a history report. */
+export async function listBudgetMergesBetween(
+  userId: string,
+  from: string | null,
+  to: string | null,
+  db: SqlExecutor = getDatabase(),
+): Promise<BudgetMerge[]> {
+  const conditions = ["user_id = $1"];
+  const params: unknown[] = [userId];
+
+  // Compared as a calendar day in the same shape the rest of the app uses, so
+  // a merge lands on the day the user made it.
+  if (from) {
+    params.push(from);
+    conditions.push(`to_char(merged_at, 'YYYY-MM-DD') >= $${params.length}`);
+  }
+  if (to) {
+    params.push(to);
+    conditions.push(`to_char(merged_at, 'YYYY-MM-DD') <= $${params.length}`);
+  }
+
+  const { rows } = await db.query<MergeRow>(
+    `SELECT ${MERGE_COLUMNS} FROM budget_merges
+      WHERE ${conditions.join(" AND ")}
+      ORDER BY merged_at DESC, merged_budget_id, source_name`,
+    params,
+  );
+  return toMerges(rows);
+}
+
+/** What a source allotment held, read while its row is locked. */
+interface MergeCandidate extends LockedBudget {
+  name: string;
+  start_date: string | null;
+  end_date: string | null;
+  funded_amount_centavos: string | number;
+}
+
+/**
+ * The period an allotment made of two others should apply to.
+ *
+ * Never arbitrarily one side's. If either source carries no date restriction
+ * the result carries none, because the merged allotment has to be able to fund
+ * everything both could — anything narrower would silently strip dates the user
+ * already had. Two dated periods become their span, which is the least
+ * restrictive range this data model can express: a gap between two
+ * non-contiguous periods is included rather than excluded, for the same reason.
+ */
+export function mergedPeriod(
+  a: { start_date: string | null; end_date: string | null },
+  b: { start_date: string | null; end_date: string | null },
+): { startDate: string | null; endDate: string | null } {
+  if (a.start_date === null || a.end_date === null) {
+    return { startDate: null, endDate: null };
+  }
+  if (b.start_date === null || b.end_date === null) {
+    return { startDate: null, endDate: null };
+  }
+
+  return {
+    startDate: a.start_date < b.start_date ? a.start_date : b.start_date,
+    endDate: a.end_date > b.end_date ? a.end_date : b.end_date,
+  };
+}
+
+/**
+ * Folds two allotments into a new one.
+ *
+ * The whole thing is one transaction under both sources' row locks, because a
+ * half-finished merge is the one outcome that would genuinely lose money: an
+ * expense whose budget no longer exists, or an allotment whose sources are
+ * still open and spendable. Either everything below happens or none of it does.
+ *
+ * Expenses are moved, not rewritten. Only `budget_id` changes — id, amount,
+ * date, name, kind and `created_at` are untouched — so the merged allotment
+ * inherits both histories exactly, with nothing duplicated and nothing lost.
+ * What each source held is written to `budget_merges` first, because once its
+ * expenses have gone its own balance no longer describes it.
+ */
+export async function mergeBudgets(
+  userId: string,
+  input: MergeInput,
+  db: SqlExecutor = getDatabase(),
+): Promise<WriteResult<{ merged: Budget; sources: Budget[] }>> {
+  const [firstId, secondId] = input.sourceBudgetIds;
+  if (firstId === secondId) {
+    return { ok: false, reason: "not-found" };
+  }
+
+  return withTransaction(db, async (tx) => {
+    // Locked in id order, so two merges naming the same pair from opposite
+    // directions cannot take the locks in opposite orders and deadlock.
+    const ids = [firstId, secondId].sort();
+    const locked: MergeCandidate[] = [];
+
+    for (const id of ids) {
+      const { rows } = await tx.query<MergeCandidate>(
+        `SELECT id, name, amount_centavos, status, allocation_type,
+                start_date, end_date, funded_amount_centavos
+           FROM budgets
+          WHERE id = $1 AND user_id = $2
+            FOR UPDATE`,
+        [id, userId],
+      );
+
+      const row = rows[0];
+      // Another account's budget is simply absent, so a crafted request learns
+      // nothing about whether it exists.
+      if (!row) return { ok: false as const, reason: "not-found" as const };
+
+      /*
+       * A closed allotment cannot be merged.
+       *
+       * Merging moves the expenses out, which would rewrite what a fully spent
+       * budget records having spent — the very thing its lock exists to
+       * prevent. An already merged one is refused for the same reason, and is
+       * also how a double submission is caught: the second request finds the
+       * source already folded in.
+       */
+      const refused = closedRefusal(row);
+      if (refused) return { ok: false as const, reason: refused };
+
+      locked.push(row);
+    }
+
+    const [a, b] = locked;
+    const amount = Number(a.amount_centavos) + Number(b.amount_centavos);
+    // Outside money adds up; money that arrived by transfer stays uncounted, so
+    // a merge can neither invent funds nor destroy them.
+    const funded =
+      Number(a.funded_amount_centavos) + Number(b.funded_amount_centavos);
+    const period = mergedPeriod(a, b);
+
+    const mergedId = randomUUID();
+    const { rows: created } = await tx.query<BudgetRow>(
+      `INSERT INTO budgets
+         (id, user_id, name, amount_centavos, start_date, end_date, locked,
+          funded_amount_centavos)
+       VALUES ($1, $2, $3, $4, $5, $6, true, $7)
+       RETURNING ${BUDGET_COLUMNS}`,
+      [mergedId, userId, input.name, amount, period.startDate, period.endDate, funded],
+    );
+
+    for (const source of locked) {
+      // The snapshot is taken before the expenses move, while the source's own
+      // figures still describe it.
+      const { rows: totals } = await tx.query<{
+        expense_centavos: string | number;
+        transfer_centavos: string | number;
+      }>(
+        `SELECT COALESCE(SUM(amount_centavos) FILTER (WHERE kind <> 'transfer'), 0)
+                  AS expense_centavos,
+                COALESCE(SUM(amount_centavos) FILTER (WHERE kind = 'transfer'), 0)
+                  AS transfer_centavos
+           FROM expenses
+          WHERE budget_id = $1`,
+        [source.id],
+      );
+
+      await tx.query(
+        `INSERT INTO budget_merges
+           (id, user_id, merged_budget_id, source_budget_id, source_name,
+            amount_centavos, expense_centavos, transfer_centavos)
+         VALUES ($1, $2, $3, $4, $5, $6, $7, $8)`,
+        [
+          randomUUID(),
+          userId,
+          mergedId,
+          source.id,
+          source.name,
+          Number(source.amount_centavos),
+          Number(totals[0]?.expense_centavos ?? 0),
+          Number(totals[0]?.transfer_centavos ?? 0),
+        ],
+      );
+
+      // Only the owning budget changes. Every other column stays as recorded,
+      // so no expense is duplicated, renamed, re-dated or re-priced.
+      await tx.query(
+        `UPDATE expenses SET budget_id = $1 WHERE budget_id = $2 AND user_id = $3`,
+        [mergedId, source.id, userId],
+      );
+
+      await tx.query(
+        `UPDATE budgets
+            SET status = 'merged', merged_into_budget_id = $1, merged_at = now(),
+                locked = true, updated_at = now()
+          WHERE id = $2 AND user_id = $3`,
+        [mergedId, source.id, userId],
+      );
+    }
+
+    // The existing rule decides whether the result is already spent out: it is
+    // closed only if the combined balance is exactly zero and something was
+    // actually charged to it.
+    const settled = await settleBudget(tx, userId, mergedId);
+    if (!settled) return { ok: false as const, reason: "not-found" as const };
+
+    const { rows: refreshed } = await tx.query<BudgetRow>(
+      `SELECT ${BUDGET_COLUMNS} FROM budgets
+        WHERE id = ANY($1) AND user_id = $2
+        ORDER BY name`,
+      [ids, userId],
+    );
+
+    void created;
+    return {
+      ok: true as const,
+      merged: settled,
+      sources: refreshed.map(toBudget),
     };
   });
 }

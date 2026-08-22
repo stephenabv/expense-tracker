@@ -30,7 +30,12 @@ export type BudgetStatus =
    * Spent down to exactly ₱0.00 and closed. Outranks every other status: the
    * budget and its expenses are a historical record from that moment on.
    */
-  | "fully-spent";
+  | "fully-spent"
+  /**
+   * Folded into another allotment. Also permanent, but for a different reason:
+   * the money was not spent, it moved somewhere else.
+   */
+  | "merged";
 
 /** How a budget relates to the calendar. */
 export type BudgetApplicability = "single" | "range" | "general";
@@ -70,6 +75,20 @@ export interface Budget {
   status: BudgetLifecycle;
   /** When the budget was closed; `null` while it is still active. */
   completedAt: string | null;
+  /**
+   * How much of `amount` is money from outside this app's other allotments.
+   *
+   * Equal to `amount` for a directly created budget and zero for one funded by
+   * a transfer. A merged allotment carries the sum of its sources', which is
+   * what keeps "how much has this person allotted?" honest through any chain of
+   * transfers and merges — a boolean could not say that ₱1,000 of a ₱3,000
+   * allotment is new money and the rest was moved.
+   */
+  fundedAmount: number;
+  /** The allotment this one was folded into; `null` unless merged. */
+  mergedIntoBudgetId: string | null;
+  /** When it was folded in; `null` unless merged. */
+  mergedAt: string | null;
   /** Whether the user allotted this money directly or moved it here. */
   allocationType: BudgetAllocation;
   /** The allotment this money came from; `null` for a direct allotment. */
@@ -88,7 +107,7 @@ export interface Budget {
 export type BudgetAllocation = "direct" | "transferred";
 
 /** The persisted lifecycle state of a budget. Mirrors the `status` column. */
-export type BudgetLifecycle = "active" | "fully_spent";
+export type BudgetLifecycle = "active" | "fully_spent" | "merged";
 
 /** Fields the user supplies when creating or editing a budget. */
 export interface BudgetInput {
@@ -96,6 +115,49 @@ export interface BudgetInput {
   amount: number;
   startDate: DateKey | null;
   endDate: DateKey | null;
+}
+
+/**
+ * What one allotment held at the moment it was folded into another.
+ *
+ * Stored rather than recomputed: once the expenses have moved, a source's live
+ * balance says nothing about the budget it was, so this snapshot is the only
+ * surviving record of its pre-merge state.
+ */
+export interface BudgetMergeSource {
+  sourceBudgetId: string;
+  /** Its name at the time, so a later rename cannot rewrite the record. */
+  sourceName: string;
+  amount: number;
+  /** Money actually spent from it. */
+  totalExpenses: number;
+  /** Money it had moved into other allotments. */
+  totalTransferred: number;
+  remaining: number;
+}
+
+/** One merge: the allotment it produced and the ones folded into it. */
+export interface BudgetMerge {
+  mergedBudgetId: string;
+  mergedAt: string;
+  sources: BudgetMergeSource[];
+  /** Sum of the sources' allotments — the merged budget's amount. */
+  totalAmount: number;
+  totalExpenses: number;
+  totalTransferred: number;
+  totalRemaining: number;
+}
+
+/**
+ * Combining two allotments into one.
+ *
+ * Only the name is the user's to choose. The amount is the sum of the two, and
+ * the period is derived from theirs — letting either be typed in would let a
+ * merge quietly change how much money exists.
+ */
+export interface MergeInput {
+  sourceBudgetIds: [string, string];
+  name: string;
 }
 
 /**

@@ -30,14 +30,18 @@ import {
 import type {
   Budget,
   BudgetInput,
+  BudgetMerge,
   BudgetSummary,
+  MergeInput,
   TransferInput,
 } from "@/types/budget";
 import type { Expense, ExpenseInput } from "@/types/expense";
 import {
   budgetsForDate,
   budgetsForToday,
+  isClosed,
   isFullySpent,
+  isMerged,
   isPeriodEnded,
   sortBudgetsByPeriod,
   summarizeBudgetsFromTotals,
@@ -59,8 +63,10 @@ import {
   createTransferAction,
   deleteBudgetAction,
   deleteExpenseAction,
+  listBudgetMergesAction,
   listBudgetsAction,
   listExpensesAction,
+  mergeBudgetsAction,
   setBudgetLockedAction,
   updateBudgetAction,
   updateExpenseAction,
@@ -96,6 +102,20 @@ interface TrackerContextValue {
    */
   completedBudgetSummaries: BudgetSummary[];
   /**
+   * Allotments folded into another one, newest merge first. Archived for the
+   * same reason and by the same rules, but they were not spent — the money went
+   * into the budget they became part of.
+   */
+  mergedBudgetSummaries: BudgetSummary[];
+  /**
+   * What each merged allotment held when it was folded in.
+   *
+   * Needed because a source's own row stops describing it the moment its
+   * expenses move: it would otherwise read as nothing spent with the whole
+   * allotment intact.
+   */
+  merges: BudgetMerge[];
+  /**
    * Budgets that could fund an expense dated today: those whose period covers
    * it, plus every general allotment. Several may apply at once — there is
    * deliberately no single "current budget".
@@ -130,6 +150,8 @@ interface TrackerContextValue {
    * transfer took the source's last peso.
    */
   createTransfer: (input: TransferInput) => Promise<TransferWriteOutcome>;
+  /** Folds two allotments into a new one. Resolves to the allotment created. */
+  mergeBudgets: (input: MergeInput) => Promise<Budget | null>;
 
   getBudget: (id: string) => Budget | null;
   getBudgetSummary: (id: string) => BudgetSummary | null;
@@ -162,18 +184,21 @@ const TrackerContext = createContext<TrackerContextValue | null>(null);
 export function TrackerProvider({
   children,
   initialBudgets,
+  initialMerges,
   initialTotals,
   initialExpenses,
   initialPagination,
 }: {
   children: ReactNode;
   initialBudgets: Budget[];
+  initialMerges: BudgetMerge[];
   initialTotals: BudgetTotals[];
   initialExpenses: Expense[];
   initialPagination: Pagination;
 }) {
   const { showToast } = useToast();
   const [budgets, setBudgets] = useState<Budget[]>(initialBudgets);
+  const [merges, setMerges] = useState<BudgetMerge[]>(initialMerges);
   const [totals, setTotals] = useState<BudgetTotals[]>(initialTotals);
   const [expenses, setExpenses] = useState<Expense[]>(initialExpenses);
   const [expensePagination, setExpensePagination] =
@@ -259,13 +284,15 @@ export function TrackerProvider({
    * allotment, and the screen has to stop offering it immediately.
    */
   const refresh = useCallback(async () => {
-    const [budgetsResult, totalsResult] = await Promise.all([
+    const [budgetsResult, totalsResult, mergesResult] = await Promise.all([
       listBudgetsAction(),
       budgetTotalsAction(),
+      listBudgetMergesAction(),
       fetchPage(query),
     ]);
     if (budgetsResult.ok) setBudgets(budgetsResult.data);
     if (totalsResult.ok) setTotals(totalsResult.data);
+    if (mergesResult.ok) setMerges(mergesResult.data);
   }, [fetchPage, query]);
 
   /** Wraps a mutation so the UI can show that something is being saved. */
@@ -407,6 +434,22 @@ export function TrackerProvider({
     [fail, justClosed, refresh, track],
   );
 
+  const mergeBudgets = useCallback(
+    (input: MergeInput) =>
+      track(async (): Promise<Budget | null> => {
+        const result = await mergeBudgetsAction(input);
+        if (!result.ok) {
+          fail(result.error);
+          return null;
+        }
+        // Budgets, totals and the expense page all move at once: two allotments
+        // became one and every expense they held changed hands.
+        await refresh();
+        return result.data.merged;
+      }),
+    [fail, refresh, track],
+  );
+
   const deleteExpense = useCallback(
     (id: string) =>
       track(async () => {
@@ -459,7 +502,7 @@ export function TrackerProvider({
   );
 
   const activeBudgetSummaries = useMemo(
-    () => budgetSummaries.filter((entry) => !isFullySpent(entry.budget)),
+    () => budgetSummaries.filter((entry) => !isClosed(entry.budget)),
     [budgetSummaries],
   );
 
@@ -476,10 +519,23 @@ export function TrackerProvider({
     [budgetSummaries],
   );
 
+  /** Newest merge first, so the archive reads as a history. */
+  const mergedBudgetSummaries = useMemo(
+    () =>
+      budgetSummaries
+        .filter((entry) => isMerged(entry.budget))
+        .sort(
+          (a, b) =>
+            (b.budget.mergedAt ?? "").localeCompare(a.budget.mergedAt ?? "") ||
+            a.budget.id.localeCompare(b.budget.id),
+        ),
+    [budgetSummaries],
+  );
+
   const isBudgetFullySpent = useCallback((budget: Budget) => isFullySpent(budget), []);
 
   const isBudgetImmutable = useCallback(
-    (budget: Budget) => isFullySpent(budget) || isPeriodEnded(budget),
+    (budget: Budget) => isClosed(budget) || isPeriodEnded(budget),
     [],
   );
 
@@ -491,6 +547,8 @@ export function TrackerProvider({
       budgetSummaries,
       activeBudgetSummaries,
       completedBudgetSummaries,
+      mergedBudgetSummaries,
+      merges,
       todaysBudgets,
       expenses,
       expensePagination,
@@ -505,6 +563,7 @@ export function TrackerProvider({
       updateExpense,
       deleteExpense,
       createTransfer,
+      mergeBudgets,
       getBudget,
       getBudgetSummary,
       budgetsCovering,
@@ -518,6 +577,8 @@ export function TrackerProvider({
       budgetSummaries,
       activeBudgetSummaries,
       completedBudgetSummaries,
+      mergedBudgetSummaries,
+      merges,
       todaysBudgets,
       expenses,
       expensePagination,
@@ -532,6 +593,7 @@ export function TrackerProvider({
       updateExpense,
       deleteExpense,
       createTransfer,
+      mergeBudgets,
       getBudget,
       getBudgetSummary,
       budgetsCovering,

@@ -45,6 +45,27 @@ export interface BudgetCardProps {
    * always refuses is worse than not offering it.
    */
   deletable?: boolean;
+  /** For a merged allotment: the name of the one it was folded into. */
+  mergedIntoName?: string;
+  /**
+   * What a merged allotment held at the moment it was folded in.
+   *
+   * Its live figures no longer describe it — the expenses moved to the budget
+   * it became part of, so it now reads as ₱0 spent with its whole allotment
+   * intact, which is exactly backwards. The snapshot is what it actually held.
+   */
+  snapshot?: {
+    totalExpenses: number;
+    totalTransferred: number;
+    remaining: number;
+  };
+  /** Renders the card as a selectable option while a merge is being set up. */
+  selection?: {
+    selected: boolean;
+    /** Set when the pair is full and this card is not one of the two. */
+    disabled?: boolean;
+    onToggle: () => void;
+  };
   onView: () => void;
   /** Omitted for a fully spent budget, which has no actions but View. */
   onEdit?: () => void;
@@ -57,13 +78,22 @@ export function BudgetCard({
   sourceName,
   immutable,
   deletable = true,
+  mergedIntoName,
+  snapshot,
+  selection,
   onView,
   onEdit,
   onDelete,
 }: BudgetCardProps) {
   const { budget, totalExpenses, remaining, status, spentRatio, isOverspent } = summary;
   const fullySpent = status === "fully-spent";
-  const transferred = summary.totalTransferred > 0;
+  const merged = status === "merged";
+
+  // A merged allotment reports what it held, not what its emptied row says.
+  const totalSpent = snapshot?.totalExpenses ?? totalExpenses;
+  const totalMoved = snapshot?.totalTransferred ?? summary.totalTransferred;
+  const balance = snapshot?.remaining ?? remaining;
+  const transferred = totalMoved > 0;
 
   // A budget spent to exactly its allotment hit the target; the amber "nearly
   // out" tone would read as a problem where there is none.
@@ -81,9 +111,30 @@ export function BudgetCard({
         "flex animate-rise-in flex-col rounded-2xl border bg-surface p-4 shadow-card transition-shadow duration-200 hover:shadow-raised sm:p-5",
         // A closed budget is set apart from the open ones at a glance, without
         // being greyed out — it is a record, not a disabled control.
-        fullySpent ? "border-border-strong" : "border-border-subtle",
+        fullySpent || merged ? "border-border-strong" : "border-border-subtle",
+        selection?.selected && "ring-2 ring-ring",
+        // Dimmed rather than hidden once the pair is full: the user can still
+        // read the card they cannot currently pick.
+        selection?.disabled && "opacity-50",
       )}
     >
+      {/* While a merge is being set up the card itself is the control, so the
+          whole thing is one target rather than a small checkbox to hunt for. */}
+      {selection ? (
+        <label className="mb-3 flex cursor-pointer items-center gap-2.5">
+          <input
+            type="checkbox"
+            checked={selection.selected}
+            disabled={selection.disabled}
+            onChange={selection.onToggle}
+            aria-label={`Select ${budget.name} to merge`}
+            className="h-4 w-4 shrink-0 accent-foreground focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-ring"
+          />
+          <span className="text-[0.8125rem] font-medium text-muted-strong">
+            {selection.selected ? "Selected to merge" : "Select to merge"}
+          </span>
+        </label>
+      ) : null}
       <div className="flex items-start justify-between gap-3">
         <div className="min-w-0">
           <h3 className="truncate text-[0.9375rem] font-semibold tracking-tight text-foreground">
@@ -103,6 +154,13 @@ export function BudgetCard({
           {isTransferred(budget) ? (
             <p className="mt-0.5 truncate text-[0.75rem] font-medium text-muted-strong">
               Transferred{sourceName ? ` from ${sourceName}` : ""}
+            </p>
+          ) : null}
+          {/* And where it went. Without this the card is a dead end: the user
+              can see the allotment is gone but not what became of it. */}
+          {merged && mergedIntoName ? (
+            <p className="mt-0.5 truncate text-[0.75rem] font-medium text-muted-strong">
+              Merged into {mergedIntoName}
             </p>
           ) : null}
         </div>
@@ -133,14 +191,14 @@ export function BudgetCard({
         <div className="min-w-0">
           <dt className="text-[0.75rem] text-muted">Spent</dt>
           <dd className="mt-0.5 truncate text-[0.9375rem] font-semibold tabular text-foreground">
-            {formatCurrency(totalExpenses)}
+            {formatCurrency(totalSpent)}
           </dd>
         </div>
         {transferred ? (
           <div className="min-w-0">
             <dt className="text-[0.75rem] text-muted">Moved</dt>
             <dd className="mt-0.5 truncate text-[0.9375rem] font-semibold tabular text-foreground">
-              {formatCurrency(summary.totalTransferred)}
+              {formatCurrency(totalMoved)}
             </dd>
           </div>
         ) : null}
@@ -152,7 +210,7 @@ export function BudgetCard({
               isOverspent ? "text-danger" : "text-foreground",
             )}
           >
-            {formatCurrency(remaining)}
+            {formatCurrency(balance)}
           </dd>
         </div>
       </dl>
@@ -167,19 +225,26 @@ export function BudgetCard({
       >
         <div
           className={cn("h-full rounded-full transition-[width] duration-500 ease-out", barTone)}
-          style={{ width: `${Math.max(spentRatio * 100, totalExpenses > 0 ? 2 : 0)}%` }}
+          style={{
+            width: `${Math.max(
+              (budget.amount > 0
+                ? Math.min((totalSpent + totalMoved) / budget.amount, 1)
+                : spentRatio) * 100,
+              totalSpent + totalMoved > 0 ? 2 : 0,
+            )}%`,
+          }}
         />
       </div>
 
       <div className="mt-4 flex flex-wrap items-center gap-2">
-        <Button variant="secondary" size="sm" onClick={onView}>
+        <Button variant="secondary" size="sm" onClick={onView} disabled={Boolean(selection)}>
           View
         </Button>
 
         {/* A fully spent budget offers exactly one action. There is no edit, no
             delete and no unlock — not hidden behind a confirmation, simply not
             there, because the record is final. */}
-        {fullySpent ? (
+        {fullySpent || merged ? (
           <span className="inline-flex items-center gap-1 rounded-full bg-surface-muted px-2.5 py-1 text-[0.6875rem] font-medium text-muted-strong ring-1 ring-inset ring-border-subtle">
             <LockIcon open={false} />
             Locked
@@ -212,8 +277,12 @@ export function BudgetCard({
         )}
 
         <span className="ml-auto text-[0.75rem] text-muted">
-          {summary.expenseCount === 1 ? "1 expense" : `${summary.expenseCount} expenses`}
-          {summary.transferCount > 0
+          {merged
+            ? "Expenses moved with it"
+            : summary.expenseCount === 1
+              ? "1 expense"
+              : `${summary.expenseCount} expenses`}
+          {!merged && summary.transferCount > 0
             ? summary.transferCount === 1
               ? " · 1 transfer"
               : ` · ${summary.transferCount} transfers`

@@ -15,9 +15,12 @@ import { formatDateKey } from "@/lib/dates";
 import {
   ALLOCATION_LABELS,
   budgetsFundedBy,
+  budgetsMergedInto,
   describeBudgetPeriodLong,
   isFullySpent,
+  isMerged,
   isTransferred,
+  mergedIntoBudget,
   sourceBudgetOf,
 } from "@/lib/budgets";
 import { cn } from "@/lib/utils";
@@ -30,7 +33,7 @@ export interface BudgetDetailModalProps {
 
 /** Read-only view of one allotment and the expenses charged to it. */
 export function BudgetDetailModal({ open, onClose, budget }: BudgetDetailModalProps) {
-  const { getBudgetSummary, budgets } = useTracker();
+  const { getBudgetSummary, budgets, merges } = useTracker();
 
   const summary = budget ? getBudgetSummary(budget.id) : null;
 
@@ -65,8 +68,22 @@ export function BudgetDetailModal({ open, onClose, budget }: BudgetDetailModalPr
   if (!budget || !summary) return null;
 
   const closed = isFullySpent(budget);
+  const merged = isMerged(budget);
   const source = sourceBudgetOf(budgets, budget);
   const funded = budgetsFundedBy(budgets, budget.id);
+  const mergedInto = mergedIntoBudget(budgets, budget);
+  const absorbed = budgetsMergedInto(budgets, budget.id);
+
+  /*
+   * A merged allotment's own figures no longer describe it — its expenses moved
+   * to the budget it became part of — so its snapshot is read instead.
+   */
+  const snapshot = merges
+    .flatMap((merge) => merge.sources)
+    .find((entry) => entry.sourceBudgetId === budget.id);
+
+  /** For the allotment a merge produced: what went into it. */
+  const madeFrom = merges.find((merge) => merge.mergedBudgetId === budget.id);
 
   return (
     <Modal
@@ -103,6 +120,18 @@ export function BudgetDetailModal({ open, onClose, budget }: BudgetDetailModalPr
           </p>
         ) : null}
 
+        {merged ? (
+          <p className="rounded-xl border border-border-strong bg-surface-muted px-4 py-3 text-[0.8125rem] text-muted-strong">
+            <span aria-hidden="true">⇢ </span>
+            This allotment was merged into{" "}
+            <span className="font-medium text-foreground">
+              {mergedInto?.name ?? "another allotment"}
+            </span>
+            . Its expenses moved there in full and are listed under that budget;
+            the figures below are what it held at the time.
+          </p>
+        ) : null}
+
         <dl className="space-y-2.5 rounded-xl border border-border-subtle bg-surface-muted p-4">
           <div className="flex items-baseline justify-between gap-4">
             <dt className="text-sm text-muted">Budget</dt>
@@ -113,16 +142,16 @@ export function BudgetDetailModal({ open, onClose, budget }: BudgetDetailModalPr
           <div className="flex items-baseline justify-between gap-4">
             <dt className="text-sm text-muted">Spent</dt>
             <dd className="font-semibold tabular text-foreground">
-              {formatCurrency(summary.totalExpenses)}
+              {formatCurrency(snapshot?.totalExpenses ?? summary.totalExpenses)}
             </dd>
           </div>
           {/* Money moved out is reported on its own line, never folded into
               "Spent": the user did not buy anything with it. */}
-          {summary.totalTransferred > 0 ? (
+          {(snapshot?.totalTransferred ?? summary.totalTransferred) > 0 ? (
             <div className="flex items-baseline justify-between gap-4">
               <dt className="text-sm text-muted">Transferred out</dt>
               <dd className="font-semibold tabular text-foreground">
-                {formatCurrency(summary.totalTransferred)}
+                {formatCurrency(snapshot?.totalTransferred ?? summary.totalTransferred)}
               </dd>
             </div>
           ) : null}
@@ -135,7 +164,7 @@ export function BudgetDetailModal({ open, onClose, budget }: BudgetDetailModalPr
                 summary.isOverspent ? "text-danger" : "text-foreground",
               )}
             >
-              {formatCurrency(summary.remaining)}
+              {formatCurrency(snapshot?.remaining ?? summary.remaining)}
             </dd>
           </div>
         </dl>
@@ -172,6 +201,69 @@ export function BudgetDetailModal({ open, onClose, budget }: BudgetDetailModalPr
           </dl>
         ) : null}
 
+        {/* Both directions of the merge, so the lineage can be followed either
+            way: what this became, or what it was made of. */}
+        {merged && mergedInto ? (
+          <dl className="space-y-2.5 rounded-xl border border-border-subtle p-4">
+            <div className="flex items-baseline justify-between gap-4">
+              <dt className="text-sm text-muted">Merged into</dt>
+              <dd className="truncate text-sm font-medium text-foreground">
+                {mergedInto.name}
+              </dd>
+            </div>
+            {budget.mergedAt ? (
+              <div className="flex items-baseline justify-between gap-4">
+                <dt className="text-sm text-muted">Merged</dt>
+                <dd className="text-sm font-medium text-foreground">
+                  {formatDateKey(budget.mergedAt.slice(0, 10))}
+                </dd>
+              </div>
+            ) : null}
+          </dl>
+        ) : null}
+
+        {madeFrom ? (
+          <div className="rounded-xl border border-border-subtle p-4">
+            <h3 className="text-sm font-semibold text-foreground">
+              Merged from
+            </h3>
+            <ul className="mt-2 space-y-1.5">
+              {madeFrom.sources.map((entry) => (
+                <li
+                  key={entry.sourceBudgetId}
+                  className="flex items-baseline justify-between gap-4 text-[0.8125rem]"
+                >
+                  <span className="truncate text-muted-strong">
+                    {entry.sourceName}
+                  </span>
+                  <span className="shrink-0 font-medium tabular text-foreground">
+                    {formatCurrency(entry.amount)}
+                  </span>
+                </li>
+              ))}
+            </ul>
+            <p className="mt-2 text-[0.8125rem] text-muted">
+              Merged {formatDateKey(madeFrom.mergedAt.slice(0, 10))}. Their
+              expenses came with them, unchanged.
+            </p>
+          </div>
+        ) : null}
+
+        {absorbed.length > 0 && !madeFrom ? (
+          <div className="rounded-xl border border-border-subtle p-4">
+            <h3 className="text-sm font-semibold text-foreground">
+              Allotments merged into this one
+            </h3>
+            <ul className="mt-2 space-y-1.5">
+              {absorbed.map((entry) => (
+                <li key={entry.id} className="truncate text-[0.8125rem] text-muted-strong">
+                  {entry.name}
+                </li>
+              ))}
+            </ul>
+          </div>
+        ) : null}
+
         {funded.length > 0 ? (
           <div className="rounded-xl border border-border-subtle p-4">
             <h3 className="text-sm font-semibold text-foreground">
@@ -206,7 +298,9 @@ export function BudgetDetailModal({ open, onClose, budget }: BudgetDetailModalPr
             </ul>
           ) : expenses.length === 0 ? (
             <p className="mt-2 text-sm text-muted">
-              Nothing recorded against this allotment yet.
+              {merged
+                ? `Its expenses moved to ${mergedInto?.name ?? "the merged allotment"} and are listed there.`
+                : "Nothing recorded against this allotment yet."}
             </p>
           ) : (
             <ul className="mt-2 divide-y divide-border-subtle rounded-xl border border-border-subtle">
