@@ -1,7 +1,11 @@
-import { afterAll, beforeAll, describe, expect, it } from "vitest";
+import { mkdtempSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+
+import { afterAll, beforeAll, describe, expect, it, vi } from "vitest";
 
 import { createTestDatabase, type TestDatabase } from "./support/db";
-import { MIGRATIONS, readMigration, splitStatements } from "@/lib/db/client";
+import { migrationFiles, readMigration, splitStatements } from "@/lib/db/client";
 
 let db: TestDatabase;
 
@@ -49,11 +53,47 @@ describe("splitStatements", () => {
   });
 });
 
+describe("the migration list", () => {
+  it("is read lazily, not while the module loads", async () => {
+    /*
+     * The bug this guards against took production down.
+     *
+     * The list was once a module-level constant built by reading the
+     * migrations directory. Every route that touches the database imports this
+     * module, and a serverless bundle does not carry `db/migrations` — so the
+     * read threw ENOENT while the module was still loading and every one of
+     * those pages died, sign-in included. Importing must never touch the disk.
+     */
+    const cwd = process.cwd();
+    const elsewhere = mkdtempSync(join(tmpdir(), "no-migrations-"));
+
+    try {
+      process.chdir(elsewhere);
+      vi.resetModules();
+      // The import itself must succeed with no migrations directory in sight.
+      const fresh = await import("@/lib/db/client");
+      expect(typeof fresh.migrationFiles).toBe("function");
+      // Only asking for the list looks at the disk, and it says where it looked.
+      expect(() => fresh.migrationFiles()).toThrow(/Could not read migrations from/);
+    } finally {
+      process.chdir(cwd);
+      vi.resetModules();
+    }
+  });
+
+  it("is in filename order, so a new file is picked up by adding it", () => {
+    const files = migrationFiles();
+    expect(files).toEqual([...files].sort());
+    expect(files[0]).toBe("001_init.sql");
+    expect(files.length).toBeGreaterThanOrEqual(5);
+  });
+});
+
 describe("migrations", () => {
   it("applies cleanly and is safe to run twice", async () => {
     // `createTestDatabase` already migrated once; running the whole set again
     // must not error.
-    for (const file of MIGRATIONS) {
+    for (const file of migrationFiles()) {
       for (const statement of splitStatements(readMigration(file))) {
         await db.query(statement);
       }
@@ -108,7 +148,7 @@ describe("migrations", () => {
 
 describe("003_optional_budget_period", () => {
   it("is listed so a fresh database gets it", () => {
-    expect(MIGRATIONS).toContain("003_optional_budget_period.sql");
+    expect(migrationFiles()).toContain("003_optional_budget_period.sql");
   });
 
   it("leaves the period columns nullable", async () => {

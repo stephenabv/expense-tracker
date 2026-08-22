@@ -277,34 +277,53 @@ function isTransientConnectionError(error: unknown): boolean {
   );
 }
 
+/** Where the schema lives, relative to whatever is running. */
+function migrationsDirectory(): string {
+  return join(process.cwd(), "db", "migrations");
+}
+
 /**
  * Migration files, in the order they must be applied.
  *
- * Read from the directory rather than listed by hand. A hand-kept array here
- * only had to be forgotten once for a new migration to stop being applied,
- * which is the kind of omission that shows up as a missing column in
- * production. The filenames are numerically prefixed, so sorting them *is* the
- * order.
+ * Read from the directory rather than listed by hand: a hand-kept array only
+ * had to be forgotten once for a new migration to stop being applied, which
+ * shows up as a missing column in production. The filenames are numerically
+ * prefixed, so sorting them *is* the order.
+ *
+ * A function, and deliberately not a module-level constant. This module is
+ * imported by every route that touches the database, and a serverless bundle
+ * does not carry `db/migrations` — reading the directory at import time
+ * therefore threw `ENOENT` while the module was still loading and took down
+ * every page that imported it, sign-in included. Nothing in production ever
+ * applies migrations; only the embedded development database and the migrate
+ * script do, and they can afford to look at the disk when they actually ask.
  */
-export const MIGRATIONS: readonly string[] = readdirSync(
-  join(process.cwd(), "db", "migrations"),
-)
-  .filter((file) => file.endsWith(".sql"))
-  .sort();
+export function migrationFiles(): string[] {
+  try {
+    return readdirSync(migrationsDirectory())
+      .filter((file) => file.endsWith(".sql"))
+      .sort();
+  } catch (error) {
+    const reason = error instanceof Error ? error.message : String(error);
+    throw new Error(
+      `Could not read migrations from ${migrationsDirectory()}: ${reason}`,
+    );
+  }
+}
 
 /** One migration's SQL. */
 export function readMigration(file: string): string {
-  return readFileSync(join(process.cwd(), "db", "migrations", file), "utf8");
+  return readFileSync(join(migrationsDirectory(), file), "utf8");
 }
 
 /** Every migration concatenated, for drivers that accept a multi-statement script. */
 export function readAllMigrations(): string {
-  return MIGRATIONS.map(readMigration).join("\n\n");
+  return migrationFiles().map(readMigration).join("\n\n");
 }
 
 /** Applies the schema. Every statement is idempotent, so repeat runs are safe. */
 export async function migrate(db: SqlExecutor = getDatabase()): Promise<void> {
-  for (const file of MIGRATIONS) {
+  for (const file of migrationFiles()) {
     // Split so drivers that reject multi-statement strings still work.
     for (const statement of splitStatements(readMigration(file))) {
       await db.query(statement);
