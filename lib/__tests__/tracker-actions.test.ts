@@ -25,6 +25,7 @@ vi.mock("next/cache", () => ({ revalidatePath: () => {} }));
 const {
   createBudgetAction,
   createExpenseAction,
+  createTransferAction,
   deleteBudgetAction,
   deleteExpenseAction,
   listBudgetsAction,
@@ -261,5 +262,235 @@ describe("an unauthenticated caller", () => {
     ]) {
       expect(errorOf(refused)).toMatch(/log in again/i);
     }
+  });
+});
+
+/* --------------------------------------------------------------- transfers */
+
+const GENERAL = { startDate: null, endDate: null } as const;
+
+/** Signs in with one allotment holding `amount`. */
+async function withBudget(amount = 10_000, name = "Main Budget") {
+  await signIn();
+  return unwrap(await createBudgetAction({ name, amount, ...GENERAL }));
+}
+
+describe("moving money through the actions", () => {
+  it("deducts the source and hands back the new allotment", async () => {
+    const main = await withBudget();
+
+    const write = unwrap(
+      await createTransferAction({
+        sourceBudgetId: main.id,
+        amount: 2_000,
+        expenseDate: "2026-08-22",
+        name: "Emergency Fund",
+        ...GENERAL,
+      }),
+    );
+
+    expect(write.destination.name).toBe("Emergency Fund");
+    expect(write.destination.allocationType).toBe("transferred");
+    expect(write.destination.sourceBudgetId).toBe(main.id);
+    expect(write.transfer.kind).toBe("transfer");
+    // All three come back because the screen has to update all three.
+    expect(write.source.id).toBe(main.id);
+  });
+
+  it("refuses to move more than the source holds", async () => {
+    const main = await withBudget(1_000);
+
+    const refused = await createTransferAction({
+      sourceBudgetId: main.id,
+      amount: 1_500,
+      expenseDate: "2026-08-22",
+      name: "Emergency Fund",
+      ...GENERAL,
+    });
+
+    expect(errorOf(refused)).toMatch(/exceeds this budget's available balance/i);
+    // Nothing partial: the destination must not exist.
+    expect(unwrap(await listBudgetsAction())).toHaveLength(1);
+  });
+
+  it("requires a name for the new allotment", async () => {
+    const main = await withBudget();
+
+    const refused = await createTransferAction({
+      sourceBudgetId: main.id,
+      amount: 2_000,
+      expenseDate: "2026-08-22",
+      name: "   ",
+      ...GENERAL,
+    });
+
+    expect(errorOf(refused)).toMatch(/give this budget a name/i);
+  });
+
+  it("rejects a zero or negative amount", async () => {
+    const main = await withBudget();
+
+    for (const amount of [0, -100]) {
+      const refused = await createTransferAction({
+        sourceBudgetId: main.id,
+        amount,
+        expenseDate: "2026-08-22",
+        name: "Emergency Fund",
+        ...GENERAL,
+      });
+      expect(errorOf(refused)).toMatch(/greater than zero/i);
+    }
+  });
+
+  it("rejects a reversed date range for the new allotment", async () => {
+    const main = await withBudget();
+
+    const refused = await createTransferAction({
+      sourceBudgetId: main.id,
+      amount: 2_000,
+      expenseDate: "2026-08-22",
+      name: "Travel Fund",
+      startDate: "2026-08-30",
+      endDate: "2026-08-25",
+    });
+
+    expect(errorOf(refused)).toBeTruthy();
+    expect(unwrap(await listBudgetsAction())).toHaveLength(1);
+  });
+
+  it("refuses a fully spent source", async () => {
+    const main = await withBudget(1_000);
+    unwrap(
+      await createExpenseAction({
+        budgetId: main.id,
+        name: "Everything",
+        amount: 1_000,
+        expenseDate: "2026-08-22",
+      }),
+    );
+
+    const refused = await createTransferAction({
+      sourceBudgetId: main.id,
+      amount: 1,
+      expenseDate: "2026-08-22",
+      name: "Emergency Fund",
+      ...GENERAL,
+    });
+
+    expect(errorOf(refused)).toMatch(/fully spent/i);
+  });
+
+  it("refuses another account's budget as a source", async () => {
+    const main = await withBudget();
+
+    // A crafted request naming someone else's budget id, with no UI involved.
+    // The intruder has an allotment of their own, so the refusal is about the
+    // id they submitted rather than about having nothing at all.
+    await withBudget(5_000, "Their Own Budget");
+    const refused = await createTransferAction({
+      sourceBudgetId: main.id,
+      amount: 100,
+      expenseDate: "2026-08-22",
+      name: "Stolen Fund",
+      ...GENERAL,
+    });
+
+    expect(errorOf(refused)).toMatch(/not available for the selected date/i);
+    // Still one allotment: their own. Nothing was created, nothing was moved.
+    expect(unwrap(await listBudgetsAction())).toHaveLength(1);
+  });
+
+  it("refuses an unauthenticated transfer", async () => {
+    const main = await withBudget();
+    callerId = null;
+
+    const refused = await createTransferAction({
+      sourceBudgetId: main.id,
+      amount: 100,
+      expenseDate: "2026-08-22",
+      name: "Emergency Fund",
+      ...GENERAL,
+    });
+
+    expect(errorOf(refused)).toMatch(/log in again/i);
+  });
+
+  it("closes the source when the transfer takes its whole balance", async () => {
+    const main = await withBudget(2_000);
+
+    const write = unwrap(
+      await createTransferAction({
+        sourceBudgetId: main.id,
+        amount: 2_000,
+        expenseDate: "2026-08-22",
+        name: "Emergency Fund",
+        ...GENERAL,
+      }),
+    );
+
+    expect(write.source.status).toBe("fully_spent");
+    expect(write.destination.status).toBe("active");
+  });
+});
+
+describe("a committed transfer through the actions", () => {
+  async function moved() {
+    const main = await withBudget();
+    const write = unwrap(
+      await createTransferAction({
+        sourceBudgetId: main.id,
+        amount: 2_000,
+        expenseDate: "2026-08-22",
+        name: "Emergency Fund",
+        ...GENERAL,
+      }),
+    );
+    return { main, ...write };
+  }
+
+  it("cannot be edited as an expense", async () => {
+    const { main, transfer } = await moved();
+
+    const refused = await updateExpenseAction(transfer.id, {
+      budgetId: main.id,
+      name: "Rewritten",
+      amount: 1,
+      expenseDate: "2026-08-22",
+    });
+
+    expect(errorOf(refused)).toMatch(/budget transfer/i);
+  });
+
+  it("cannot be deleted", async () => {
+    const { transfer } = await moved();
+    expect(errorOf(await deleteExpenseAction(transfer.id))).toMatch(
+      /budget transfer/i,
+    );
+  });
+
+  it("fixes the destination's amount", async () => {
+    const { destination } = await moved();
+
+    const refused = await updateBudgetAction(destination.id, {
+      name: "Emergency Fund",
+      amount: 9_999,
+      ...GENERAL,
+    });
+
+    expect(errorOf(refused)).toMatch(/budget transfer/i);
+  });
+
+  it("stops the source being deleted", async () => {
+    const { main } = await moved();
+    expect(errorOf(await deleteBudgetAction(main.id))).toMatch(
+      /funded another allotment/i,
+    );
+  });
+
+  it("stops the destination being deleted", async () => {
+    const { destination } = await moved();
+    expect(errorOf(await deleteBudgetAction(destination.id))).toMatch(
+      /budget transfer/i,
+    );
   });
 });

@@ -634,7 +634,15 @@ describe("domain rules", () => {
   it("carries the status into the summary the screens render", () => {
     const [first, second] = summarizeBudgetsFromTotals(
       [open, closed],
-      [{ budgetId: "b2", totalExpenses: 1_000, expenseCount: 1 }],
+      [
+        {
+          budgetId: "b2",
+          totalExpenses: 1_000,
+          totalTransferred: 0,
+          expenseCount: 1,
+          transferCount: 0,
+        },
+      ],
     );
     expect(first.status).toBe("unrestricted");
     expect(second.status).toBe("fully-spent");

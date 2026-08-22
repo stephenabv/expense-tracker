@@ -9,7 +9,7 @@
  * queries that ship rather than a stand-in.
  */
 
-import { readFileSync } from "node:fs";
+import { readdirSync, readFileSync } from "node:fs";
 import { createRequire } from "node:module";
 import { join } from "node:path";
 
@@ -277,13 +277,20 @@ function isTransientConnectionError(error: unknown): boolean {
   );
 }
 
-/** Migration files, in the order they must be applied. */
-export const MIGRATIONS = [
-  "001_init.sql",
-  "002_restrict_api_roles.sql",
-  "003_optional_budget_period.sql",
-  "004_budget_completion.sql",
-] as const;
+/**
+ * Migration files, in the order they must be applied.
+ *
+ * Read from the directory rather than listed by hand. A hand-kept array here
+ * only had to be forgotten once for a new migration to stop being applied,
+ * which is the kind of omission that shows up as a missing column in
+ * production. The filenames are numerically prefixed, so sorting them *is* the
+ * order.
+ */
+export const MIGRATIONS: readonly string[] = readdirSync(
+  join(process.cwd(), "db", "migrations"),
+)
+  .filter((file) => file.endsWith(".sql"))
+  .sort();
 
 /** One migration's SQL. */
 export function readMigration(file: string): string {

@@ -12,7 +12,7 @@
 
 import { revalidatePath } from "next/cache";
 
-import type { Budget, BudgetInput } from "@/types/budget";
+import type { Budget, BudgetInput, TransferInput } from "@/types/budget";
 import type { Expense, ExpenseInput } from "@/types/expense";
 import { getUserId } from "@/lib/server/session";
 import type { Page } from "@/lib/pagination";
@@ -27,6 +27,7 @@ import {
   deleteExpenseRow,
   insertBudget,
   insertExpense,
+  insertTransfer,
   listBudgets,
   loadTrackerData,
   setBudgetLockedRow,
@@ -34,7 +35,11 @@ import {
   updateExpenseRow,
   type WriteRefusal,
 } from "@/lib/db/tracker";
-import { validateBudgetForm, validateExpenseForm } from "@/lib/validation";
+import {
+  validateBudgetForm,
+  validateExpenseForm,
+  validateTransferForm,
+} from "@/lib/validation";
 import {
   FULLY_SPENT_LABEL,
   budgetApplicability,
@@ -42,6 +47,7 @@ import {
   expensesOutsidePeriod,
   isFullySpent,
   isPeriodEnded,
+  isTransferred,
 } from "@/lib/budgets";
 import { formatCurrency } from "@/lib/currency";
 import { isDatabaseConfigured } from "@/lib/db/client";
@@ -66,13 +72,33 @@ const NOT_CONFIGURED = {
 const LOCKED_BUDGET_ERROR = `This budget is ${FULLY_SPENT_LABEL} and locked. It can no longer be changed.`;
 const LOCKED_EXPENSE_ERROR = `This expense belongs to a ${FULLY_SPENT_LABEL} budget and can no longer be changed.`;
 
+/*
+ * A transfer has two sides, and both were written at once.
+ *
+ * Rewriting one of them on its own is what these messages refuse: the money
+ * has already moved, and an edit here would leave the other side describing a
+ * different transaction. The remedy is a new transfer, not a correction to this
+ * one.
+ */
+const TRANSFER_EXPENSE_ERROR =
+  "This is a budget transfer, not an expense. Committed transfers cannot be edited or deleted.";
+const TRANSFER_BUDGET_ERROR =
+  "This allotment was funded by a budget transfer. Its amount comes from that transfer and cannot be changed here.";
+const TRANSFER_SOURCE_ERROR =
+  "This budget funded another allotment. Deleting it would leave that allotment with no source.";
+
 function refusal(
   reason: WriteRefusal,
   remaining: number | undefined,
   missing: string,
   lockedError: string,
+  transferError = TRANSFER_EXPENSE_ERROR,
 ): { ok: false; error: string } {
   if (reason === "locked") return { ok: false, error: lockedError };
+  if (reason === "transfer") return { ok: false, error: transferError };
+  if (reason === "has-transfers") {
+    return { ok: false, error: TRANSFER_SOURCE_ERROR };
+  }
   if (reason === "insufficient") {
     return {
       ok: false,
@@ -218,6 +244,12 @@ export async function updateBudgetAction(
     return { ok: false, error: LOCKED_BUDGET_ERROR };
   }
 
+  // A transferred allotment's amount is the transfer that paid for it, so the
+  // form must not be able to move it. Name and dates are still the user's.
+  if (isTransferred(target) && input.amount !== target.amount) {
+    return { ok: false, error: TRANSFER_BUDGET_ERROR };
+  }
+
   // A period that has already passed stays immutable too, which is what keeps
   // past reports true.
   if (isPeriodEnded(target)) {
@@ -268,6 +300,7 @@ export async function updateBudgetAction(
       updated.remaining,
       "Budget not found.",
       LOCKED_BUDGET_ERROR,
+      TRANSFER_BUDGET_ERROR,
     );
   }
 
@@ -313,6 +346,8 @@ export async function deleteBudgetAction(
       deleted.remaining,
       "Budget not found.",
       LOCKED_BUDGET_ERROR,
+      "This allotment was created by a budget transfer and cannot be deleted. " +
+        "Deleting it would make the money that funded it disappear.",
     );
   }
 
@@ -434,9 +469,10 @@ export async function updateExpenseAction(
 
   // An expense charged to a closed budget is part of that record. Changing it
   // — including moving it to another allotment — would rewrite history, so the
-  // request is refused before it is even validated.
-  const locked = await expenseBelongsToClosedBudget(userId, expenseId);
-  if (locked) return { ok: false, error: LOCKED_EXPENSE_ERROR };
+  // request is refused before it is even validated. A transfer is refused for
+  // its own reason: it has a second side that this form cannot touch.
+  const blocked = await transactionWriteBlock(userId, expenseId);
+  if (blocked) return { ok: false, error: blocked };
 
   const check = await validateExpenseAgainstServer(userId, input, expenseId);
   if (!check.ok) return check;
@@ -477,19 +513,122 @@ export async function deleteExpenseAction(
 }
 
 /**
- * True when the expense is part of a closed budget's record.
+ * What a transfer write returns.
+ *
+ * All three, because the caller has to update all three: the transaction now
+ * sits in the list, the source's balance fell, and a whole new allotment
+ * exists. Returning only the destination would leave the screen showing a
+ * source that still looks as full as it was.
+ */
+export interface TransferWrite {
+  transfer: Expense;
+  source: Budget;
+  destination: Budget;
+}
+
+/**
+ * Moves money from one allotment into a new one.
+ *
+ * The source is resolved from the *user's own* budgets before anything else, so
+ * a request naming another account's budget finds nothing to transfer from —
+ * ownership is the first filter, not a check that could be skipped. The
+ * repository then re-checks the balance under the source's row lock and writes
+ * both halves in one transaction.
+ */
+export async function createTransferAction(
+  input: TransferInput,
+): Promise<ActionResult<TransferWrite>> {
+  if (!isDatabaseConfigured()) return NOT_CONFIGURED;
+  const userId = await getUserId();
+  if (!userId) return UNAUTHENTICATED;
+
+  const { budgets, expenses } = await loadTrackerData(userId);
+
+  // Named by the user but already closed: say so plainly rather than letting it
+  // fail below as "not available for this date", which explains nothing.
+  const named = budgets.find((budget) => budget.id === input.sourceBudgetId);
+  if (named && isFullySpent(named)) {
+    return { ok: false, error: LOCKED_BUDGET_ERROR };
+  }
+
+  const eligible = budgetsForDate(budgets, input.expenseDate);
+  const source = eligible.find((entry) => entry.id === input.sourceBudgetId);
+
+  const availableBalance = source
+    ? source.amount -
+      expenses
+        .filter((expense) => expense.budgetId === source.id)
+        .reduce((sum, expense) => sum + expense.amount, 0)
+    : undefined;
+
+  const result = validateTransferForm(
+    input.name,
+    String(input.amount),
+    input.expenseDate,
+    input.sourceBudgetId,
+    budgetApplicability(input),
+    input.startDate ?? "",
+    input.endDate ?? "",
+    { eligibleBudgets: eligible, availableBalance },
+  );
+
+  if (!result.ok) {
+    return {
+      ok: false,
+      error:
+        result.errors.name ??
+        result.errors.amount ??
+        result.errors.expenseDate ??
+        result.errors.sourceBudgetId ??
+        result.errors.period!,
+    };
+  }
+
+  const written = await insertTransfer(userId, {
+    sourceBudgetId: result.values!.sourceBudgetId,
+    amount: result.values!.amount,
+    expenseDate: result.values!.expenseDate,
+    name: result.values!.name,
+    startDate: result.values!.startDate,
+    endDate: result.values!.endDate,
+  });
+
+  if (!written.ok) {
+    return refusal(
+      written.reason,
+      written.remaining,
+      "Budget not found.",
+      LOCKED_BUDGET_ERROR,
+    );
+  }
+
+  refresh();
+  return {
+    ok: true,
+    data: {
+      transfer: written.transfer,
+      source: written.source,
+      destination: written.destination,
+    },
+  };
+}
+
+/**
+ * The reason this transaction may not be written to, or `null` if it may.
  *
  * Only ever used to produce a clearer message: the repository refuses the write
  * regardless, under the budget's row lock, so this cannot be raced past.
  */
-async function expenseBelongsToClosedBudget(
+async function transactionWriteBlock(
   userId: string,
   expenseId: string,
-): Promise<boolean> {
+): Promise<string | null> {
   const { budgets, expenses } = await loadTrackerData(userId);
   const expense = expenses.find((entry) => entry.id === expenseId);
-  if (!expense) return false;
+  if (!expense) return null;
+
+  if (expense.kind === "transfer") return TRANSFER_EXPENSE_ERROR;
 
   const budget = budgets.find((entry) => entry.id === expense.budgetId);
-  return budget ? isFullySpent(budget) : false;
+  return budget && isFullySpent(budget) ? LOCKED_EXPENSE_ERROR : null;
 }

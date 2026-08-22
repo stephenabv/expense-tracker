@@ -31,7 +31,10 @@ import {
   describeBudgetPeriodLong,
   expensesForBudget,
   isGeneralBudget,
+  isSpending,
+  isTransfer,
   sortBudgetsByPeriod,
+  totalAllotted,
 } from "@/lib/budgets";
 
 /* ------------------------------------------------------------------ filters */
@@ -169,9 +172,20 @@ export function buildHistory(
 
     for (const date of dates) {
       const dayExpenses = groups.get(date) ?? [];
-      const totalExpenses = calculateTotalExpenses(dayExpenses);
+      /*
+       * Two figures, one balance.
+       *
+       * The chain has to fall by everything charged that day — a transfer took
+       * the money out just as surely as a purchase did — but the reported
+       * spend counts only what was actually spent, or the report would show a
+       * purchase that never happened.
+       */
+      const totalExpenses = calculateTotalExpenses(dayExpenses.filter(isSpending));
+      const totalTransferred = calculateTotalExpenses(dayExpenses.filter(isTransfer));
       const startingBalance = running;
-      const endingBalance = roundCurrency(startingBalance - totalExpenses);
+      const endingBalance = roundCurrency(
+        startingBalance - totalExpenses - totalTransferred,
+      );
       running = endingBalance;
 
       days.push({
@@ -182,9 +196,12 @@ export function buildHistory(
         budgetStartDate: budget.startDate,
         budgetEndDate: budget.endDate,
         budgetStatus: budget.status,
+        allocationType: budget.allocationType,
+        sourceBudgetId: budget.sourceBudgetId,
         startingBalance,
         endingBalance,
         totalExpenses,
+        totalTransferred,
         expenses: sortExpensesByNewest(dayExpenses),
       });
     }
@@ -232,6 +249,7 @@ export function historyForFilter(
 const EMPTY_SUMMARY: HistorySummary = {
   totalAllocated: 0,
   totalExpenses: 0,
+  totalTransferred: 0,
   totalRemaining: 0,
   expenseCount: 0,
   activeDays: 0,
@@ -274,10 +292,20 @@ export function summarizeHistory(days: HistoryDay[]): HistorySummary {
         budgetStartDate: last.budgetStartDate,
         budgetEndDate: last.budgetEndDate,
         budgetStatus: last.budgetStatus,
+        allocationType: last.allocationType,
+        sourceBudgetId: last.sourceBudgetId,
         totalExpenses: sumAmounts(budgetDays.map((day) => day.totalExpenses)),
+        totalTransferred: sumAmounts(budgetDays.map((day) => day.totalTransferred)),
         // The balance after the last day of this budget inside the range.
         remaining: last.endingBalance,
-        expenseCount: budgetDays.reduce((sum, day) => sum + day.expenses.length, 0),
+        expenseCount: budgetDays.reduce(
+          (sum, day) => sum + day.expenses.filter(isSpending).length,
+          0,
+        ),
+        transferCount: budgetDays.reduce(
+          (sum, day) => sum + day.expenses.filter(isTransfer).length,
+          0,
+        ),
         activeDays: budgetDays.length,
         firstDate: first.date,
         lastDate: last.date,
@@ -292,8 +320,19 @@ export function summarizeHistory(days: HistoryDay[]): HistorySummary {
   const distinctDates = new Set(chronological.map((day) => day.date));
 
   return {
-    totalAllocated: sumAmounts(budgetSummaries.map((entry) => entry.budgetAmount)),
+    // Transferred allotments are left out: those pesos are already inside the
+    // allocation of the budget they came from, and counting them twice would
+    // report money the user never had.
+    totalAllocated: totalAllotted(
+      budgetSummaries.map((entry) => ({
+        amount: entry.budgetAmount,
+        allocationType: entry.allocationType,
+      })),
+    ),
     totalExpenses: sumAmounts(budgetSummaries.map((entry) => entry.totalExpenses)),
+    totalTransferred: sumAmounts(
+      budgetSummaries.map((entry) => entry.totalTransferred),
+    ),
     totalRemaining: sumAmounts(budgetSummaries.map((entry) => entry.remaining)),
     expenseCount: budgetSummaries.reduce((sum, entry) => sum + entry.expenseCount, 0),
     activeDays: distinctDates.size,

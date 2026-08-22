@@ -8,6 +8,17 @@
 
 import type { DateKey } from "@/lib/dates";
 
+/**
+ * What a transaction actually is.
+ *
+ * `"expense"` is money consumed. `"transfer"` is money moved into a new
+ * allotment — the source's balance drops by the same amount either way, but
+ * only the first is spending. Everything that reports what a person *spent*
+ * filters on this, which is what stops a transfer from being counted twice:
+ * once as an expense and again as the destination's budget.
+ */
+export type ExpenseKind = "expense" | "transfer";
+
 export interface Expense {
   /** Stable unique identifier. */
   id: string;
@@ -25,6 +36,15 @@ export interface Expense {
   createdAt: string;
   /** When the record was last modified. */
   updatedAt: string;
+  /** Whether this is spending or a move into another allotment. */
+  kind: ExpenseKind;
+  /**
+   * For a transfer: the allotment this transaction created.
+   *
+   * Read back from the destination budget rather than stored twice, so the two
+   * cannot drift. `null` for an ordinary expense.
+   */
+  transferBudgetId: string | null;
 }
 
 /** Fields a user supplies when creating or editing an expense. */

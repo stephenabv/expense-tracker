@@ -5,6 +5,7 @@ import { useMemo } from "react";
 import type { Expense } from "@/types/expense";
 import { formatCurrency } from "@/lib/currency";
 import { formatShortDateKey } from "@/lib/dates";
+import { TRANSFER_ROW_LABEL } from "@/lib/budgets";
 
 function EditIcon() {
   return (
@@ -36,6 +37,23 @@ function DeleteIcon() {
       className="h-4 w-4"
     >
       <path d="M4.5 5.5h11M8 5.5V4.2A1.2 1.2 0 0 1 9.2 3h1.6A1.2 1.2 0 0 1 12 4.2v1.3M6 5.5l.6 9.3A1.2 1.2 0 0 0 7.8 16h4.4a1.2 1.2 0 0 0 1.2-1.2l.6-9.3" />
+    </svg>
+  );
+}
+
+function TransferIcon() {
+  return (
+    <svg
+      aria-hidden="true"
+      viewBox="0 0 20 20"
+      fill="none"
+      stroke="currentColor"
+      strokeWidth={1.6}
+      strokeLinecap="round"
+      strokeLinejoin="round"
+      className="h-4 w-4"
+    >
+      <path d="M4 7.5h11m-3-3 3 3-3 3M16 12.5H5m3-3-3 3 3 3" />
     </svg>
   );
 }
@@ -79,6 +97,7 @@ export function ExpenseItem({
   onEdit,
   onDelete,
 }: ExpenseItemProps) {
+  const isTransfer = expense.kind === "transfer";
   const monogram = useMemo(
     () => expense.name.trim().charAt(0).toUpperCase() || "?",
     [expense.name],
@@ -88,11 +107,14 @@ export function ExpenseItem({
 
   return (
     <li className="group flex animate-rise-in items-center gap-3 px-4 py-3.5 transition-colors duration-150 hover:bg-surface-muted sm:gap-4 sm:px-5">
+      {/* A transfer gets an arrow rather than an initial: the row is about
+          money changing pots, and a monogram would make it look like a purchase
+          named after the destination. */}
       <span
         aria-hidden="true"
         className="flex h-9 w-9 shrink-0 items-center justify-center rounded-full bg-surface-muted text-sm font-semibold text-muted-strong ring-1 ring-inset ring-border-subtle"
       >
-        {monogram}
+        {isTransfer ? <TransferIcon /> : monogram}
       </span>
 
       <div className="min-w-0 flex-1">
@@ -105,7 +127,20 @@ export function ExpenseItem({
         {/* The allotment gets its own line: sharing one with the date left it
             truncated to "Emerge…" on a phone, which is no answer to "where did
             this money come from?". */}
-        {budgetName ? (
+        {/*
+         * A transfer replaces the allotment line rather than adding to it.
+         *
+         * The row is already titled with the allotment the money became, so
+         * naming the destination again would say the same thing twice — and on
+         * a phone two long lines just truncate each other. Naming the *source*
+         * is what the reader does not already know, and it says the row is a
+         * deduction in the same breath.
+         */}
+        {isTransfer ? (
+          <p className="text-[0.8125rem] font-medium text-muted-strong">
+            {budgetName ? `Deduction from ${budgetName}` : TRANSFER_ROW_LABEL}
+          </p>
+        ) : budgetName ? (
           <p className="truncate text-[0.8125rem] font-medium text-muted-strong">
             {budgetName}
           </p>
@@ -119,7 +154,15 @@ export function ExpenseItem({
       {/* Hidden, not disabled: a greyed-out Edit invites a click and then
           explains itself, while the lock says up front that this row is
           finished. The server refuses the write either way. */}
-      {locked ? (
+      {isTransfer ? (
+        <span
+          title="Committed budget transfer — it cannot be edited or deleted"
+          className="flex h-8 w-8 shrink-0 items-center justify-center text-muted"
+        >
+          <span className="sr-only">Committed transfer — read only</span>
+          <LockIcon />
+        </span>
+      ) : locked ? (
         <span
           title={`${budgetName ?? "This budget"} is fully spent — this expense is locked`}
           className="flex h-8 w-8 shrink-0 items-center justify-center text-muted"

@@ -171,6 +171,105 @@ export function validateBudgetForm(
   };
 }
 
+/* ---------------------------------------------------------------- transfers */
+
+export interface TransferFormErrors {
+  name?: string;
+  amount?: string;
+  expenseDate?: string;
+  sourceBudgetId?: string;
+  period?: string;
+}
+
+export interface TransferFormResult {
+  ok: boolean;
+  values?: {
+    name: string;
+    amount: number;
+    expenseDate: DateKey;
+    sourceBudgetId: string;
+    startDate: DateKey | null;
+    endDate: DateKey | null;
+  };
+  errors: TransferFormErrors;
+}
+
+export interface TransferFormOptions {
+  /**
+   * Budgets that could fund a transfer on this date. A closed allotment is
+   * never among them, so it cannot be named as a source.
+   */
+  eligibleBudgets: Budget[];
+  /** What the chosen source has left. Omit to skip the balance check. */
+  availableBalance?: number;
+}
+
+/**
+ * Validates a budget transfer.
+ *
+ * A transfer is two things at once — a deduction from the source and a new
+ * allotment — so both sets of rules apply. The amount is checked against the
+ * source's balance exactly as an expense would be, because moving more money
+ * than a budget holds is the same impossibility as spending it; the name and
+ * the period are checked as a budget's, because that is what they become.
+ */
+export function validateTransferForm(
+  name: string,
+  amount: string,
+  expenseDate: string,
+  sourceBudgetId: string,
+  applicability: BudgetApplicability,
+  startDate: string,
+  endDate: string,
+  options: TransferFormOptions,
+): TransferFormResult {
+  const { eligibleBudgets, availableBalance } = options;
+
+  // The destination is a budget, so its name follows a budget's rules.
+  const nameResult = validateBudgetName(name);
+  const amountResult = validateExpenseAmount(amount, { availableBalance });
+  const dateResult = validateExpenseDate(expenseDate, eligibleBudgets);
+  const periodResult = validateBudgetPeriod(applicability, startDate, endDate);
+
+  const errors: TransferFormErrors = {};
+  if (!nameResult.ok) errors.name = nameResult.error;
+  if (!amountResult.ok) errors.amount = amountResult.error;
+  if (!dateResult.ok) errors.expenseDate = dateResult.error;
+  if (!periodResult.ok) errors.period = periodResult.error;
+
+  if (dateResult.ok) {
+    if (sourceBudgetId.trim() === "") {
+      errors.sourceBudgetId = "Choose which budget allotment the money comes from.";
+    } else if (!eligibleBudgets.some((budget) => budget.id === sourceBudgetId)) {
+      errors.sourceBudgetId =
+        "That budget allotment is not available for the selected date.";
+    }
+  }
+
+  if (
+    errors.name ||
+    errors.amount ||
+    errors.expenseDate ||
+    errors.sourceBudgetId ||
+    errors.period
+  ) {
+    return { ok: false, errors };
+  }
+
+  return {
+    ok: true,
+    values: {
+      name: nameResult.value!,
+      amount: amountResult.value!,
+      expenseDate: dateResult.value!,
+      sourceBudgetId,
+      startDate: periodResult.value!.startDate,
+      endDate: periodResult.value!.endDate,
+    },
+    errors,
+  };
+}
+
 /* ----------------------------------------------------------------- expenses */
 
 export function validateExpenseName(input: string): ValidationResult<string> {

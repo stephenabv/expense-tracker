@@ -2,7 +2,7 @@
 
 import { useEffect, useMemo, useRef, useState } from "react";
 
-import type { Budget } from "@/types/budget";
+import type { Budget, BudgetApplicability } from "@/types/budget";
 import type { Expense } from "@/types/expense";
 import { useTracker } from "@/components/providers/TrackerProvider";
 import { useToast } from "@/components/ui/Toast";
@@ -11,6 +11,7 @@ import { Modal } from "@/components/ui/Modal";
 import { TextField } from "@/components/ui/TextField";
 import { DateField } from "@/components/ui/DateField";
 import { SelectField } from "@/components/ui/SelectField";
+import { ApplicabilityField } from "@/components/budgets/ApplicabilityField";
 import {
   CURRENCY_SYMBOL,
   formatAmount,
@@ -18,10 +19,15 @@ import {
   parseAmount,
 } from "@/lib/currency";
 import { formatDateKey, todayKey } from "@/lib/dates";
-import { describeBudgetPeriod, describeBudgetPeriodLong } from "@/lib/budgets";
 import {
+  describeBudgetPeriod,
+  describeBudgetPeriodLong,
+} from "@/lib/budgets";
+import {
+  MAX_BUDGET_NAME_LENGTH,
   MAX_NAME_LENGTH,
   validateExpenseForm,
+  validateTransferForm,
   type ExpenseFormErrors,
 } from "@/lib/validation";
 
@@ -55,6 +61,13 @@ function budgetOptionLabel(budget: Budget, balance: number): string {
  * Changing the date re-derives the options. If the budget already chosen no
  * longer applies, the selection is cleared and the form says why, rather than
  * leaving the expense attached to an allotment that cannot fund it.
+ *
+ * The same form also records a *transfer*. Moving ₱2,000 from Main Budget into
+ * a new Emergency Fund starts exactly like an expense — pick the pot, name the
+ * amount — and differs only in where the money lands, so it belongs here rather
+ * than behind a second, near-identical screen. The toggle changes what the
+ * fields mean: the allotment becomes the source, the name becomes the new
+ * allotment's, and a period appears because what is being created is a budget.
  */
 export function ExpenseFormModal({
   open,
@@ -62,8 +75,13 @@ export function ExpenseFormModal({
   expense = null,
   onCreateBudget,
 }: ExpenseFormModalProps) {
-  const { addExpense, updateExpense, availableBalanceFor, budgetsCovering } =
-    useTracker();
+  const {
+    addExpense,
+    updateExpense,
+    createTransfer,
+    availableBalanceFor,
+    budgetsCovering,
+  } = useTracker();
   const { showToast } = useToast();
 
   const isEditing = expense !== null;
@@ -73,7 +91,19 @@ export function ExpenseFormModal({
   const [amount, setAmount] = useState("");
   const [expenseDate, setExpenseDate] = useState(today);
   const [budgetId, setBudgetId] = useState("");
-  const [errors, setErrors] = useState<ExpenseFormErrors>({});
+  const [errors, setErrors] = useState<ExpenseFormErrors & { period?: string }>({});
+
+  /**
+   * Whether this transaction creates an allotment instead of spending.
+   *
+   * Only offered when adding. Converting a recorded expense into a transfer
+   * afterwards would mean inventing a budget for money already treated as
+   * spent, so an existing row's kind is fixed.
+   */
+  const [asTransfer, setAsTransfer] = useState(false);
+  const [mode, setMode] = useState<BudgetApplicability>("general");
+  const [startDate, setStartDate] = useState(today);
+  const [endDate, setEndDate] = useState(today);
   /** Set when a date change invalidated the budget that was selected. */
   const [displaced, setDisplaced] = useState(false);
   /**
@@ -106,6 +136,10 @@ export function ExpenseFormModal({
     setErrors({});
     setDisplaced(false);
     setSubmitting(false);
+    setAsTransfer(false);
+    setMode("general");
+    setStartDate(date);
+    setEndDate(date);
   }, [open, expense, today]);
 
   // Budgets that may fund this date: those whose period covers it, plus every
@@ -162,6 +196,9 @@ export function ExpenseFormModal({
   }, [open, eligible, availableBalanceFor, expense]);
 
   const parsedAmount = parseAmount(amount);
+  /** The transfer amount, once it is a usable figure. */
+  const transferAmount =
+    parsedAmount !== null && parsedAmount > 0 ? parsedAmount : null;
   const exceedsBalance =
     selectedBudget !== null &&
     parsedAmount !== null &&
@@ -171,9 +208,69 @@ export function ExpenseFormModal({
   const noBudget = eligible.length === 0;
   const mustChoose = eligible.length > 1;
 
+  /** Appends the source's closure to a success message, when it happened. */
+  const withClosure = (message: string, completed: Budget | null) =>
+    completed
+      ? `${message}. ${completed.name} is now fully spent and locked.`
+      : message;
+
+  const submitTransfer = async () => {
+    const result = validateTransferForm(
+      name,
+      amount,
+      expenseDate,
+      budgetId,
+      mode,
+      startDate,
+      endDate,
+      {
+        eligibleBudgets: eligible,
+        availableBalance: selectedBudget ? availableBalance : undefined,
+      },
+    );
+
+    if (!result.ok) {
+      // The source select carries the same error slot as an expense's budget.
+      setErrors({ ...result.errors, budgetId: result.errors.sourceBudgetId });
+      if (result.errors.name) nameRef.current?.focus();
+      return;
+    }
+
+    const values = result.values!;
+    setSubmitting(true);
+
+    const write = await createTransfer({
+      sourceBudgetId: values.sourceBudgetId,
+      amount: values.amount,
+      expenseDate: values.expenseDate,
+      name: values.name,
+      startDate: values.startDate,
+      endDate: values.endDate,
+    });
+
+    if (!write.saved) {
+      setSubmitting(false);
+      return;
+    }
+
+    showToast(
+      withClosure(
+        `${formatCurrency(values.amount)} moved to ${values.name}`,
+        write.completed,
+      ),
+      "positive",
+    );
+    onClose();
+  };
+
   const handleSubmit = async (event: React.FormEvent) => {
     event.preventDefault();
     if (submitting) return;
+
+    if (asTransfer && !isEditing) {
+      await submitTransfer();
+      return;
+    }
 
     const result = validateExpenseForm(name, amount, expenseDate, budgetId, {
       eligibleBudgets: eligible,
@@ -201,17 +298,16 @@ export function ExpenseFormModal({
       return;
     }
 
-    const saved = isEditing
-      ? "Expense updated"
-      : `${values.name} · ${formatCurrency(values.amount)} added`;
-
     // One message, not two: an expense that spends the last centavo closes its
     // allotment, and the user needs to hear that in the same breath — a second
     // toast a moment later would simply replace this one.
     showToast(
-      write.completed
-        ? `${saved}. ${write.completed.name} is now fully spent and locked.`
-        : saved,
+      withClosure(
+        isEditing
+          ? "Expense updated"
+          : `${values.name} · ${formatCurrency(values.amount)} added`,
+        write.completed,
+      ),
       "positive",
     );
     onClose();
@@ -224,10 +320,12 @@ export function ExpenseFormModal({
       title={isEditing ? "Edit Expense" : "Add Expense"}
       description={
         selectedBudget
-          ? `Deducted from ${selectedBudget.name} · ${formatCurrency(
-              Math.max(availableBalance, 0),
-            )} available`
-          : "Choose the allotment this expense is deducted from."
+          ? `${asTransfer ? "Moved out of" : "Deducted from"} ${
+              selectedBudget.name
+            } · ${formatCurrency(Math.max(availableBalance, 0))} available`
+          : asTransfer
+            ? "Choose the allotment the money is moved out of."
+            : "Choose the allotment this expense is deducted from."
       }
       footer={
         <>
@@ -249,21 +347,29 @@ export function ExpenseFormModal({
             {submitting
               ? isEditing
                 ? "Saving…"
-                : "Adding Expense…"
+                : asTransfer
+                  ? "Creating Allotment…"
+                  : "Adding Expense…"
               : isEditing
                 ? "Save changes"
-                : "Add Expense"}
+                : asTransfer
+                  ? "Create Allotment"
+                  : "Add Expense"}
           </Button>
         </>
       }
     >
       <form id={FORM_ID} onSubmit={handleSubmit} noValidate className="space-y-4">
+        {/* One name field, not two. When the transaction creates an allotment
+            the thing being named *is* that allotment, and a separate "expense
+            name" alongside it would only ask the user to say the same thing
+            twice. */}
         <TextField
           ref={nameRef}
-          label="Expense Name"
-          placeholder="Groceries"
+          label={asTransfer ? "New Budget Allotment Name" : "Expense Name"}
+          placeholder={asTransfer ? "Emergency Fund" : "Groceries"}
           value={name}
-          maxLength={MAX_NAME_LENGTH}
+          maxLength={asTransfer ? MAX_BUDGET_NAME_LENGTH : MAX_NAME_LENGTH}
           autoComplete="off"
           enterKeyHint="next"
           error={errors.name}
@@ -304,6 +410,31 @@ export function ExpenseFormModal({
           }}
         />
 
+        {/* Offered only when adding: an expense already recorded cannot become a
+            transfer without inventing an allotment for money already spent. */}
+        {!isEditing && !noBudget ? (
+          <label className="flex cursor-pointer items-start gap-3 rounded-xl border border-border-subtle bg-surface-muted p-3.5">
+            <input
+              type="checkbox"
+              checked={asTransfer}
+              onChange={(event) => {
+                setAsTransfer(event.target.checked);
+                setErrors({});
+              }}
+              className="mt-0.5 h-4 w-4 shrink-0 accent-foreground focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-ring"
+            />
+            <span className="min-w-0">
+              <span className="block text-sm font-medium text-foreground">
+                Create this expense as a new budget allotment
+              </span>
+              <span className="mt-0.5 block text-[0.8125rem] text-muted">
+                Moves the money into a new allotment instead of spending it. Your
+                total funds do not change — only which pot holds them.
+              </span>
+            </span>
+          </label>
+        ) : null}
+
         {noBudget ? (
           <div
             role="alert"
@@ -330,13 +461,19 @@ export function ExpenseFormModal({
         ) : (
           <>
             <SelectField
-              label="Budget Allotment"
+              label={asTransfer ? "Source Budget" : "Budget Allotment"}
               value={budgetId}
               error={errors.budgetId}
               hint={
                 selectedBudget
-                  ? `${describeBudgetPeriodLong(selectedBudget)} · deducted from this allotment`
-                  : "Several allotments can fund this date — choose the one this belongs to."
+                  ? `${describeBudgetPeriodLong(selectedBudget)} · ${
+                      asTransfer
+                        ? "the money is taken out of this allotment"
+                        : "deducted from this allotment"
+                    }`
+                  : asTransfer
+                    ? "Choose the allotment the money comes out of."
+                    : "Several allotments can fund this date — choose the one this belongs to."
               }
               onChange={(event) => {
                 setBudgetId(event.target.value);
@@ -382,6 +519,55 @@ export function ExpenseFormModal({
                 </div>
               </dl>
             ) : null}
+
+            {/* The allotment being created gets the same three choices as any
+                other, because after this it is one. */}
+            {asTransfer ? (
+              <ApplicabilityField
+                label="New Allotment Applicability"
+                mode={mode}
+                startDate={startDate}
+                endDate={endDate}
+                error={errors.period}
+                generalNote="The new allotment can fund an expense on any date."
+                onModeChange={(next) => {
+                  setMode(next);
+                  if (next === "range" && endDate < startDate) setEndDate(startDate);
+                  setErrors((prev) => ({ ...prev, period: undefined }));
+                }}
+                onStartDateChange={(value) => {
+                  setStartDate(value);
+                  if (mode === "range" && endDate < value) setEndDate(value);
+                  setErrors((prev) => ({ ...prev, period: undefined }));
+                }}
+                onEndDateChange={(value) => {
+                  setEndDate(value);
+                  setErrors((prev) => ({ ...prev, period: undefined }));
+                }}
+              />
+            ) : null}
+
+            {/* Says the whole sentence back before it happens: which pot loses
+                the money, how much, and what it becomes. */}
+            {asTransfer && selectedBudget && transferAmount !== null ? (
+              <p
+                role="status"
+                className="rounded-xl border border-border-subtle bg-surface-muted p-3.5 text-[0.8125rem] text-muted-strong"
+              >
+                <span className="font-semibold tabular text-foreground">
+                  {formatCurrency(transferAmount)}
+                </span>{" "}
+                will be deducted from{" "}
+                <span className="font-medium text-foreground">
+                  {selectedBudget.name}
+                </span>{" "}
+                and created as a new{" "}
+                <span className="font-medium text-foreground">
+                  {name.trim() === "" ? "budget" : name.trim()}
+                </span>{" "}
+                allotment.
+              </p>
+            ) : null}
           </>
         )}
 
@@ -401,7 +587,9 @@ export function ExpenseFormModal({
                 </dd>
               </div>
               <div className="flex items-center justify-between gap-4">
-                <dt className="text-muted-strong">Expense</dt>
+                <dt className="text-muted-strong">
+                  {asTransfer ? "Transfer amount" : "Expense"}
+                </dt>
                 <dd className="font-medium tabular text-foreground">
                   {formatCurrency(parsedAmount ?? 0)}
                 </dd>

@@ -9,11 +9,10 @@ import { Button } from "@/components/ui/Button";
 import { Modal } from "@/components/ui/Modal";
 import { ConfirmDialog } from "@/components/ui/ConfirmDialog";
 import { TextField } from "@/components/ui/TextField";
-import { DateField } from "@/components/ui/DateField";
+import { ApplicabilityField } from "@/components/budgets/ApplicabilityField";
 import { CURRENCY_SYMBOL, formatAmount, formatCurrency } from "@/lib/currency";
 import { formatDateRange, todayKey } from "@/lib/dates";
 import {
-  NO_DATE_PERIOD_LABEL,
   budgetApplicability,
   describeBudgetPeriodLong,
   findOverlaps,
@@ -23,7 +22,6 @@ import {
   validateBudgetForm,
   type BudgetFormErrors,
 } from "@/lib/validation";
-import { cn } from "@/lib/utils";
 
 const FORM_ID = "budget-form";
 
@@ -33,12 +31,6 @@ interface PendingValues {
   startDate: string | null;
   endDate: string | null;
 }
-
-const MODES: Array<{ value: BudgetApplicability; label: string }> = [
-  { value: "general", label: "No Specific Date" },
-  { value: "single", label: "Single Date" },
-  { value: "range", label: "Date Range" },
-];
 
 export interface BudgetFormModalProps {
   open: boolean;
@@ -270,88 +262,30 @@ export function BudgetFormModal({
             }}
           />
 
-          <fieldset>
-            <legend className="text-sm font-medium text-muted-strong">
-              Applicability
-            </legend>
+          <ApplicabilityField
+            mode={mode}
+            startDate={startDate}
+            endDate={endDate}
+            error={errors.period}
+            onModeChange={(next) => {
+              setMode(next);
+              if (next === "range" && endDate < startDate) setEndDate(startDate);
+              setErrors((prev) => ({ ...prev, period: undefined }));
+            }}
+            onStartDateChange={(value) => {
+              setStartDate(value);
+              if (mode === "range" && endDate < value) setEndDate(value);
+              setErrors((prev) => ({ ...prev, period: undefined }));
+            }}
+            onEndDateChange={(value) => {
+              setEndDate(value);
+              setErrors((prev) => ({ ...prev, period: undefined }));
+            }}
+          />
 
-            <div
-              role="radiogroup"
-              aria-label="Applicability"
-              className="mt-1.5 flex flex-wrap gap-1 rounded-xl border border-border-subtle bg-surface-muted p-1"
-            >
-              {MODES.map(({ value, label }) => (
-                <button
-                  key={value}
-                  type="button"
-                  role="radio"
-                  aria-checked={mode === value}
-                  onClick={() => {
-                    setMode(value);
-                    if (value === "range" && endDate < startDate) setEndDate(startDate);
-                    setErrors((prev) => ({ ...prev, period: undefined }));
-                  }}
-                  className={cn(
-                    "flex-1 rounded-lg px-3 py-1.5 text-[0.8125rem] font-medium transition-colors duration-150",
-                    "focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-ring",
-                    mode === value
-                      ? "bg-surface text-foreground shadow-card"
-                      : "text-muted hover:text-foreground",
-                  )}
-                >
-                  {label}
-                </button>
-              ))}
-            </div>
-
-            {/* The date fields are removed rather than disabled: a greyed-out
-                picker still implies the dates are being stored. */}
-            {mode === "general" ? (
-              <p className="mt-3 rounded-xl border border-border-subtle bg-surface-muted p-3.5 text-[0.8125rem] text-muted-strong">
-                <span className="font-medium text-foreground">
-                  {NO_DATE_PERIOD_LABEL}.
-                </span>{" "}
-                This allotment can fund an expense on any date, and stays
-                available until you change or delete it.
-              </p>
-            ) : (
-              <div className="mt-3 flex flex-col gap-3 sm:flex-row">
-                <DateField
-                  label={mode === "single" ? "Applicable Date" : "Start Date"}
-                  value={startDate}
-                  invalid={errors.period !== undefined}
-                  onChange={(event) => {
-                    setStartDate(event.target.value);
-                    if (mode === "range" && endDate < event.target.value) {
-                      setEndDate(event.target.value);
-                    }
-                    setErrors((prev) => ({ ...prev, period: undefined }));
-                  }}
-                />
-
-                {mode === "range" ? (
-                  <DateField
-                    label="End Date"
-                    value={endDate}
-                    min={startDate}
-                    invalid={errors.period !== undefined}
-                    onChange={(event) => {
-                      setEndDate(event.target.value);
-                      setErrors((prev) => ({ ...prev, period: undefined }));
-                    }}
-                  />
-                ) : null}
-              </div>
-            )}
-
-            {errors.period ? (
-              <p role="alert" className="mt-1.5 text-sm text-danger">
-                {errors.period}
-              </p>
-            ) : mode !== "general" ? (
-              <p className="mt-1.5 text-sm text-muted">{periodSentence}</p>
-            ) : null}
-          </fieldset>
+          {!errors.period && mode !== "general" ? (
+            <p className="-mt-1 text-sm text-muted">{periodSentence}</p>
+          ) : null}
 
           {/* Advisory only. Overlapping allotments are legal now that each
               expense names its own budget. */}

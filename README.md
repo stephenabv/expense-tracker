@@ -78,16 +78,26 @@ expense records on each render, so the screen cannot drift from the data.
   and fully spent ones are immutable permanently.
 - **Expense management** — add, edit and delete expenses, each with a name,
   amount, date and budget. Deletions are confirmed first.
+- **Move money between allotments** — a toggle on Add Expense turns the
+  transaction into a **budget transfer**: the amount leaves the source and
+  becomes a new allotment with its own name and period, linked permanently back
+  to where it came from. A transfer is never counted as spending, and the
+  destination's allotment is never counted as new money — ₱2,000 moved out of
+  ₱10,000 still leaves the user with ₱10,000, in two pots instead of one.
+  Committed transfers cannot be edited or deleted, and neither side can be
+  deleted while the link exists.
 - **Overspending protection** — an expense larger than *its own* budget's
   balance is blocked, with the shortfall spelled out.
 - **History** — filterable by a single date or an inclusive range, with presets,
   and narrowable to one allotment. Days are grouped and labelled with the budget
   that paid for each.
 - **PDF export** — a real, paginated document with a per-budget summary that
-  names each allotment's own applicability and whether it is Active or Fully
-  Spent, and a day-by-day breakdown grouped by date and then by budget. Closed
-  budgets are reported, never dropped: leaving them out would understate what
-  was allocated and spent. It contains exactly what the filter selected.
+  names each allotment's own applicability, whether it is Active or Fully Spent,
+  and whether it was allotted directly or transferred, plus a day-by-day
+  breakdown grouped by date and then by budget. Closed budgets are reported,
+  never dropped: leaving them out would understate what was allocated and spent.
+  Transfers are reported on their own line, never added to expenses. It contains
+  exactly what the filter selected.
 - **Persistence** — budgets and expenses live in PostgreSQL, scoped to the
   signed-in account, and every mutation is re-validated on the server.
 - **Paginated by the database** — the expense list is fetched one page at a
@@ -435,8 +445,14 @@ budgets                    (id, user_id, name, amount_centavos,
                             -- allotment with no date restriction
                             -- status is 'active' or 'fully_spent'; the latter
                             -- is permanent and pairs with completed_at
+                            allocation_type, source_budget_id,
+                            source_transaction_id
+                            -- 'transferred' allotments name the budget and the
+                            -- transaction their money came from
 expenses                   (id, user_id, budget_id, name, amount_centavos,
-                            expense_date, …)
+                            expense_date, kind, …)
+                            -- kind is 'expense' or 'transfer'; only the first
+                            -- is spending
 ```
 
 Two deliberate choices in the schema:
@@ -453,6 +469,17 @@ Two deliberate choices in the schema:
   clause. Storing `status` also means a later edit cannot silently reopen a
   settled record. A CHECK keeps `status = 'fully_spent'` and `completed_at`
   in step, so "when was this closed?" always has an answer.
+- **A transfer is a kind of transaction, not a second table.** The money really
+  did leave the source, so the row belongs in `expenses` and the balance falls
+  by it like any other charge. What `kind` buys is the ability to filter: every
+  figure that means "what did this person spend" excludes transfers, and every
+  figure that adds allotments together counts only the `direct` ones. Without
+  that split the same ₱2,000 would appear twice — once as an expense and again
+  as the destination's budget.
+- **The source/destination link is `RESTRICT`, not `CASCADE`.** Deleting the
+  budget that funded another would either take the destination's funding with
+  it or erase where its money came from. Both rewrite a committed transaction,
+  so the database refuses and the application explains why first.
 - **Calendar dates are `YYYY-MM-DD` text**, not `DATE`. Budget periods and
   expense dates are calendar concepts in the user's timezone; a `DATE` column
   round-tripped through a driver invites an off-by-one-day bug, and zero-padded

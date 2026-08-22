@@ -4,7 +4,11 @@ import type { BudgetSummary } from "@/types/budget";
 import { Button } from "@/components/ui/Button";
 import { BudgetStatusBadge } from "@/components/budgets/BudgetStatusBadge";
 import { formatCurrency } from "@/lib/currency";
-import { NO_DATE_LABEL, describeBudgetPeriodLong } from "@/lib/budgets";
+import {
+  NO_DATE_LABEL,
+  describeBudgetPeriodLong,
+  isTransferred,
+} from "@/lib/budgets";
 import { cn } from "@/lib/utils";
 
 function LockIcon({ open }: { open: boolean }) {
@@ -31,8 +35,16 @@ function LockIcon({ open }: { open: boolean }) {
 
 export interface BudgetCardProps {
   summary: BudgetSummary;
+  /** For a transferred allotment: the budget its money came from. */
+  sourceName?: string;
   /** A budget whose period has passed: read-only, but still deletable. */
   immutable: boolean;
+  /**
+   * False when deleting would rewrite a transfer — either this allotment was
+   * funded by one, or it funded another. Offering a Delete that the server
+   * always refuses is worse than not offering it.
+   */
+  deletable?: boolean;
   onView: () => void;
   /** Omitted for a fully spent budget, which has no actions but View. */
   onEdit?: () => void;
@@ -42,13 +54,16 @@ export interface BudgetCardProps {
 /** One allotment: its terms, its own spend, and its own remaining balance. */
 export function BudgetCard({
   summary,
+  sourceName,
   immutable,
+  deletable = true,
   onView,
   onEdit,
   onDelete,
 }: BudgetCardProps) {
   const { budget, totalExpenses, remaining, status, spentRatio, isOverspent } = summary;
   const fullySpent = status === "fully-spent";
+  const transferred = summary.totalTransferred > 0;
 
   // A budget spent to exactly its allotment hit the target; the amber "nearly
   // out" tone would read as a problem where there is none.
@@ -83,11 +98,32 @@ export function BudgetCard({
               ? NO_DATE_LABEL
               : describeBudgetPeriodLong(budget)}
           </p>
+          {/* Where the money came from, on the card itself — the origin is part
+              of what this allotment is, not a detail buried a click away. */}
+          {isTransferred(budget) ? (
+            <p className="mt-0.5 truncate text-[0.75rem] font-medium text-muted-strong">
+              Transferred{sourceName ? ` from ${sourceName}` : ""}
+            </p>
+          ) : null}
         </div>
         {status === "unrestricted" ? null : <BudgetStatusBadge status={status} />}
       </div>
 
-      <dl className="mt-4 grid grid-cols-3 gap-3">
+      {/*
+       * Four columns once money has been moved out.
+       *
+       * Folding a transfer into "Spent" would report a purchase the user never
+       * made; leaving it out entirely would leave the remaining balance
+       * unexplained. It gets its own figure, and only when there is one.
+       */}
+      <dl
+        className={cn(
+          "mt-4 grid gap-3",
+          // Four figures do not fit across a phone — squeezing them turns
+          // ₱13,000.00 into "₱13,0…", which is worse than no figure at all.
+          transferred ? "grid-cols-2 sm:grid-cols-4" : "grid-cols-3",
+        )}
+      >
         <div className="min-w-0">
           <dt className="text-[0.75rem] text-muted">Budget</dt>
           <dd className="mt-0.5 truncate text-[0.9375rem] font-semibold tabular text-foreground">
@@ -100,6 +136,14 @@ export function BudgetCard({
             {formatCurrency(totalExpenses)}
           </dd>
         </div>
+        {transferred ? (
+          <div className="min-w-0">
+            <dt className="text-[0.75rem] text-muted">Moved</dt>
+            <dd className="mt-0.5 truncate text-[0.9375rem] font-semibold tabular text-foreground">
+              {formatCurrency(summary.totalTransferred)}
+            </dd>
+          </div>
+        ) : null}
         <div className="min-w-0">
           <dt className="text-[0.75rem] text-muted">Remaining</dt>
           <dd
@@ -150,14 +194,16 @@ export function BudgetCard({
             <Button variant="ghost" size="sm" onClick={onEdit}>
               Edit
             </Button>
-            <Button
-              variant="ghost"
-              size="sm"
-              onClick={onDelete}
-              className="text-muted hover:bg-danger-soft hover:text-danger"
-            >
-              Delete
-            </Button>
+            {deletable ? (
+              <Button
+                variant="ghost"
+                size="sm"
+                onClick={onDelete}
+                className="text-muted hover:bg-danger-soft hover:text-danger"
+              >
+                Delete
+              </Button>
+            ) : null}
             <span className="inline-flex items-center gap-1 text-[0.6875rem] font-medium text-muted">
               <LockIcon open={!budget.locked} />
               {budget.locked ? "Locked" : "Unlocked"}
@@ -167,6 +213,11 @@ export function BudgetCard({
 
         <span className="ml-auto text-[0.75rem] text-muted">
           {summary.expenseCount === 1 ? "1 expense" : `${summary.expenseCount} expenses`}
+          {summary.transferCount > 0
+            ? summary.transferCount === 1
+              ? " · 1 transfer"
+              : ` · ${summary.transferCount} transfers`
+            : ""}
         </span>
       </div>
     </article>

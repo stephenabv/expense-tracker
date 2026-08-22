@@ -70,7 +70,22 @@ export interface Budget {
   status: BudgetLifecycle;
   /** When the budget was closed; `null` while it is still active. */
   completedAt: string | null;
+  /** Whether the user allotted this money directly or moved it here. */
+  allocationType: BudgetAllocation;
+  /** The allotment this money came from; `null` for a direct allotment. */
+  sourceBudgetId: string | null;
+  /** The transfer transaction that funded it; `null` for a direct allotment. */
+  sourceTransactionId: string | null;
 }
+
+/**
+ * Where a budget's money came from.
+ *
+ * `"transferred"` money is not new money — it was already allotted to the
+ * source and has only moved. Totals that add allotments together count the
+ * direct ones only, or the same pesos would appear twice.
+ */
+export type BudgetAllocation = "direct" | "transferred";
 
 /** The persisted lifecycle state of a budget. Mirrors the `status` column. */
 export type BudgetLifecycle = "active" | "fully_spent";
@@ -83,14 +98,38 @@ export interface BudgetInput {
   endDate: DateKey | null;
 }
 
+/**
+ * Moving money from one allotment into a new one.
+ *
+ * The amount and the date describe the transaction taken out of the source;
+ * the name and the period describe the allotment it creates.
+ */
+export interface TransferInput {
+  /** The allotment the money leaves. */
+  sourceBudgetId: string;
+  amount: number;
+  /** The day the transfer is recorded against the source. */
+  expenseDate: DateKey;
+  /** Name of the allotment being created. */
+  name: string;
+  startDate: DateKey | null;
+  endDate: DateKey | null;
+}
+
 /** Derived, never-persisted view of one budget's finances. */
 export interface BudgetSummary {
   budget: Budget;
-  /** Sum of the expenses assigned to this budget. */
+  /** Money actually spent from this budget. Transfers are not spending. */
   totalExpenses: number;
-  /** `amount - totalExpenses`. Negative when overspent. */
+  /** Money moved out of this budget into other allotments. */
+  totalTransferred: number;
+  /** Everything that has left the budget: `totalExpenses + totalTransferred`. */
+  totalDeducted: number;
+  /** `amount - totalDeducted`. Negative when overspent. */
   remaining: number;
+  /** Number of ordinary expenses. Transfers are counted separately. */
   expenseCount: number;
+  transferCount: number;
   status: BudgetStatus;
   applicability: BudgetApplicability;
   /** Fraction of the allotment consumed, clamped to 0–1. */
