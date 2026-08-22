@@ -71,13 +71,20 @@ expense records on each render, so the screen cannot drift from the data.
   the SQL refuses it again. A request that skips the interface entirely gets
   nowhere.
 - **Statuses** — Active, Upcoming, Period ended, Over budget, No Date
-  Restriction, and Fully Spent, derived from the applicability, the spending and
-  the stored lifecycle.
+  Restriction, Fully Spent, and Merged, derived from the applicability, the
+  spending and the stored lifecycle.
 - **Per-budget locking** — a new allotment is locked; unlocking and editing one
   leaves every other untouched. Budgets whose period has ended are immutable,
   and fully spent ones are immutable permanently.
 - **Expense management** — add, edit and delete expenses, each with a name,
   amount, date and budget. Deletions are confirmed first.
+- **Merge allotments** — pick two and fold them into one. The allocations add
+  up, every expense moves across untouched (same id, amount, date, name and
+  timestamps — nothing deleted, nothing duplicated), and the two originals stay
+  as locked records of what they held at the time. A merge is structural, not
+  financial: the allotted, spent and remaining totals are identical before and
+  after. The merged allotment takes the least restrictive period the two could
+  fund, so no dates are silently lost.
 - **Move money between allotments** — a toggle on Add Expense turns the
   transaction into a **budget transfer**: the amount leaves the source and
   becomes a new allotment with its own name and period, linked permanently back
@@ -96,8 +103,8 @@ expense records on each render, so the screen cannot drift from the data.
   and whether it was allotted directly or transferred, plus a day-by-day
   breakdown grouped by date and then by budget. Closed budgets are reported,
   never dropped: leaving them out would understate what was allocated and spent.
-  Transfers are reported on their own line, never added to expenses. It contains
-  exactly what the filter selected.
+  Transfers are reported on their own line and merges in a section of their own,
+  neither added to expenses. It contains exactly what the filter selected.
 - **Persistence** — budgets and expenses live in PostgreSQL, scoped to the
   signed-in account, and every mutation is re-validated on the server.
 - **Paginated by the database** — the expense list is fetched one page at a
@@ -438,6 +445,10 @@ users                      (id, name, gender, email, password_hash,
                             email_verified_at, created_at, updated_at)
 email_verification_tokens  (id, user_id, token_hash, expires_at, consumed_at)
 password_reset_tokens      (id, user_id, token_hash, expires_at, consumed_at)
+budget_merges              (id, user_id, merged_budget_id, source_budget_id,
+                            source_name, amount_centavos, expense_centavos,
+                            transfer_centavos, merged_at)
+                            -- one row per source: what it held when folded in
 budgets                    (id, user_id, name, amount_centavos,
                             start_date, end_date, locked,
                             status, completed_at, …)
@@ -449,6 +460,10 @@ budgets                    (id, user_id, name, amount_centavos,
                             source_transaction_id
                             -- 'transferred' allotments name the budget and the
                             -- transaction their money came from
+                            funded_amount_centavos, merged_into_budget_id,
+                            merged_at
+                            -- status is also 'merged'; funded_amount is how
+                            -- much of the allotment is money from outside
 expenses                   (id, user_id, budget_id, name, amount_centavos,
                             expense_date, kind, …)
                             -- kind is 'expense' or 'transfer'; only the first
@@ -476,6 +491,20 @@ Two deliberate choices in the schema:
   figure that adds allotments together counts only the `direct` ones. Without
   that split the same ₱2,000 would appear twice — once as an expense and again
   as the destination's budget.
+- **How much of an allotment is "new money" is a figure, not a flag.** The
+  allotted total may not count the same pesos twice, which is why a transferred
+  allotment has never contributed to it. Merging makes that a matter of degree:
+  a ₱2,000 transferred fund combined with a ₱1,000 direct one is a ₱3,000
+  allotment of which only ₱1,000 is new. A boolean cannot say that — calling the
+  result direct would invent ₱2,000, calling it transferred would destroy
+  ₱1,000 — so `funded_amount_centavos` carries the real number through any depth
+  of transferring and merging.
+- **A merge moves expenses rather than re-parenting the reporting.** Only
+  `budget_id` changes; every other column is left exactly as recorded. That
+  keeps one active owner for each expense, so balances, pagination, history and
+  the fully-spent rules all work unchanged. What a source *held* survives in
+  `budget_merges`, because once its expenses have gone its own balance no longer
+  describes it.
 - **The source/destination link is `RESTRICT`, not `CASCADE`.** Deleting the
   budget that funded another would either take the destination's funding with
   it or erase where its money came from. Both rewrite a committed transaction,

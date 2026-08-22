@@ -35,6 +35,10 @@ export function budget(
     allocationType: "direct",
     sourceBudgetId: null,
     sourceTransactionId: null,
+    // A directly created allotment is entirely its own money.
+    fundedAmount: amount,
+    mergedIntoBudgetId: null,
+    mergedAt: null,
     ...overrides,
   };
 }
@@ -70,6 +74,8 @@ export function transferredBudget(
     allocationType: "transferred",
     sourceBudgetId: sourceId,
     sourceTransactionId: transactionId,
+    // Its money was already counted where it came from.
+    fundedAmount: 0,
     ...overrides,
   });
 }

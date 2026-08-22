@@ -29,6 +29,7 @@ const {
   deleteBudgetAction,
   deleteExpenseAction,
   listBudgetsAction,
+  mergeBudgetsAction,
   setBudgetLockedAction,
   updateBudgetAction,
   updateExpenseAction,
@@ -492,5 +493,205 @@ describe("a committed transfer through the actions", () => {
     expect(errorOf(await deleteBudgetAction(destination.id))).toMatch(
       /budget transfer/i,
     );
+  });
+});
+
+/* ------------------------------------------------------------------ merges */
+
+describe("merging through the actions", () => {
+  async function twoBudgets() {
+    await signIn();
+    const food = unwrap(
+      await createBudgetAction({ name: "Food Budget", amount: 5_000, ...GENERAL }),
+    );
+    const weekend = unwrap(
+      await createBudgetAction({ name: "Weekend Budget", amount: 3_000, ...GENERAL }),
+    );
+    unwrap(
+      await createExpenseAction({
+        budgetId: food.id,
+        name: "Groceries",
+        amount: 2_000,
+        expenseDate: "2026-08-22",
+      }),
+    );
+    return { food, weekend };
+  }
+
+  it("combines the two and keeps every expense", async () => {
+    const { food, weekend } = await twoBudgets();
+
+    const write = unwrap(
+      await mergeBudgetsAction({
+        sourceBudgetIds: [food.id, weekend.id],
+        name: "Combined Budget",
+      }),
+    );
+
+    expect(write.merged.amount).toBe(8_000);
+    expect(write.merged.name).toBe("Combined Budget");
+    expect(write.sources.every((entry) => entry.status === "merged")).toBe(true);
+
+    // The originals are archived, not deleted.
+    expect(unwrap(await listBudgetsAction())).toHaveLength(3);
+  });
+
+  it("requires a name for the result", async () => {
+    const { food, weekend } = await twoBudgets();
+
+    const refused = await mergeBudgetsAction({
+      sourceBudgetIds: [food.id, weekend.id],
+      name: "   ",
+    });
+
+    expect(errorOf(refused)).toMatch(/give this budget a name/i);
+    expect(unwrap(await listBudgetsAction())).toHaveLength(2);
+  });
+
+  it("refuses the same allotment twice", async () => {
+    const { food } = await twoBudgets();
+
+    const refused = await mergeBudgetsAction({
+      sourceBudgetIds: [food.id, food.id],
+      name: "Itself",
+    });
+
+    expect(errorOf(refused)).toMatch(/exactly two/i);
+  });
+
+  it("refuses a fully spent allotment, and says why", async () => {
+    await signIn();
+    const spent = unwrap(
+      await createBudgetAction({ name: "Spent Out", amount: 1_000, ...GENERAL }),
+    );
+    const other = unwrap(
+      await createBudgetAction({ name: "Other", amount: 2_000, ...GENERAL }),
+    );
+    unwrap(
+      await createExpenseAction({
+        budgetId: spent.id,
+        name: "Everything",
+        amount: 1_000,
+        expenseDate: "2026-08-22",
+      }),
+    );
+
+    const refused = await mergeBudgetsAction({
+      sourceBudgetIds: [spent.id, other.id],
+      name: "Combined",
+    });
+
+    expect(errorOf(refused)).toMatch(/fully spent/i);
+    expect(unwrap(await listBudgetsAction())).toHaveLength(2);
+  });
+
+  it("refuses an allotment already merged", async () => {
+    const { food, weekend } = await twoBudgets();
+    unwrap(
+      await mergeBudgetsAction({
+        sourceBudgetIds: [food.id, weekend.id],
+        name: "Combined Budget",
+      }),
+    );
+    const other = unwrap(
+      await createBudgetAction({ name: "Another", amount: 1_000, ...GENERAL }),
+    );
+
+    const refused = await mergeBudgetsAction({
+      sourceBudgetIds: [food.id, other.id],
+      name: "Again",
+    });
+
+    expect(errorOf(refused)).toMatch(/already been merged/i);
+  });
+
+  it("refuses another account's allotments", async () => {
+    const { food, weekend } = await twoBudgets();
+
+    // A crafted request naming someone else's ids, with no UI involved.
+    await signIn();
+    const refused = await mergeBudgetsAction({
+      sourceBudgetIds: [food.id, weekend.id],
+      name: "Stolen",
+    });
+
+    expect(errorOf(refused)).toMatch(/no longer available/i);
+    expect(unwrap(await listBudgetsAction())).toHaveLength(0);
+  });
+
+  it("refuses an unauthenticated merge", async () => {
+    const { food, weekend } = await twoBudgets();
+    callerId = null;
+
+    const refused = await mergeBudgetsAction({
+      sourceBudgetIds: [food.id, weekend.id],
+      name: "Combined",
+    });
+
+    expect(errorOf(refused)).toMatch(/log in again/i);
+  });
+});
+
+describe("a merged allotment through the actions", () => {
+  async function merged() {
+    await signIn();
+    const food = unwrap(
+      await createBudgetAction({ name: "Food Budget", amount: 5_000, ...GENERAL }),
+    );
+    const weekend = unwrap(
+      await createBudgetAction({ name: "Weekend Budget", amount: 3_000, ...GENERAL }),
+    );
+    const write = unwrap(
+      await mergeBudgetsAction({
+        sourceBudgetIds: [food.id, weekend.id],
+        name: "Combined Budget",
+      }),
+    );
+    return { food, weekend, ...write };
+  }
+
+  it("refuses an edit to a source", async () => {
+    const { food } = await merged();
+
+    const refused = await updateBudgetAction(food.id, {
+      name: "Renamed",
+      amount: 9_999,
+      ...GENERAL,
+    });
+
+    expect(errorOf(refused)).toMatch(/merged into another/i);
+  });
+
+  it("refuses a delete of a source", async () => {
+    const { food } = await merged();
+    expect(errorOf(await deleteBudgetAction(food.id))).toMatch(/merged into another/i);
+  });
+
+  it("refuses an expense against a source", async () => {
+    const { food } = await merged();
+
+    const refused = await createExpenseAction({
+      budgetId: food.id,
+      name: "Late entry",
+      amount: 10,
+      expenseDate: "2026-08-22",
+    });
+
+    expect(errorOf(refused)).toMatch(/merged into another/i);
+  });
+
+  it("still accepts expenses against the result", async () => {
+    const { merged: combined } = await merged();
+
+    const write = unwrap(
+      await createExpenseAction({
+        budgetId: combined.id,
+        name: "Groceries",
+        amount: 500,
+        expenseDate: "2026-08-22",
+      }),
+    );
+
+    expect(write.expense.budgetId).toBe(combined.id);
   });
 });

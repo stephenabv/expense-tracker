@@ -2,7 +2,7 @@
 
 import { useState } from "react";
 
-import type { HistoryDay, HistorySummary } from "@/types/history";
+import type { HistoryDay, HistoryMerge, HistorySummary } from "@/types/history";
 import { Button } from "@/components/ui/Button";
 import { useToast } from "@/components/ui/Toast";
 
@@ -10,6 +10,8 @@ export interface ExportPdfButtonProps {
   /** Exactly the days currently on screen — the PDF must match the filter. */
   days: HistoryDay[];
   summary: HistorySummary;
+  /** Merges inside the same selection; reported apart from the spending. */
+  merges?: HistoryMerge[];
   periodLabel: string;
   /** Named in the report when the history is narrowed to one allotment. */
   budgetLabel?: string | null;
@@ -60,13 +62,15 @@ function Spinner() {
 export function ExportPdfButton({
   days,
   summary,
+  merges = [],
   periodLabel,
   budgetLabel = null,
 }: ExportPdfButtonProps) {
   const { showToast } = useToast();
   const [busy, setBusy] = useState(false);
 
-  const disabled = days.length === 0;
+  // A period containing only a merge still has something worth exporting.
+  const disabled = days.length === 0 && merges.length === 0;
 
   const handleExport = async () => {
     if (disabled || busy) return;
@@ -77,7 +81,13 @@ export function ExportPdfButton({
         "@/lib/pdf/report"
       );
 
-      const doc = buildHistoryReport({ days, summary, periodLabel, budgetLabel });
+      const doc = buildHistoryReport({
+        days,
+        summary,
+        merges,
+        periodLabel,
+        budgetLabel,
+      });
       doc.save(historyReportFilename(summary));
 
       showToast("PDF report downloaded", "positive");

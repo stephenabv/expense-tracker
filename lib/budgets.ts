@@ -143,8 +143,28 @@ export function budgetStatus(
   expenses: Expense[],
   now: Date = new Date(),
 ): BudgetStatus {
+  return statusFor(budget, calculateBudgetRemaining(budget, expenses), now);
+}
+
+/**
+ * The status ladder, in one place.
+ *
+ * Both ways of summarising a budget need this — from its expense rows, and from
+ * the totals SQL computed — and they once carried a copy each. Adding "merged"
+ * to one of them and not the other put a folded-away allotment back under the
+ * calendar rules, where it showed as "Period ended". A rule with two homes is a
+ * rule that will disagree with itself.
+ */
+export function statusFor(
+  budget: Pick<Budget, "status" | "startDate" | "endDate">,
+  remaining: number,
+  now: Date = new Date(),
+): BudgetStatus {
+  // A merged allotment no longer holds anything; what its old numbers say
+  // stopped mattering the moment it was folded in.
+  if (isMerged(budget)) return "merged";
   if (isFullySpent(budget)) return "fully-spent";
-  if (calculateBudgetRemaining(budget, expenses) < 0) return "over-budget";
+  if (remaining < 0) return "over-budget";
   if (isGeneralBudget(budget)) return "unrestricted";
 
   const today = todayKey(now);
@@ -166,6 +186,29 @@ export function isFullySpent(budget: Pick<Budget, "status">): boolean {
 }
 
 /**
+ * True when the allotment has been folded into another one.
+ *
+ * Permanent, like being fully spent, and locked just as firmly — but for a
+ * different reason: the money was not consumed, it moved. Its expenses now
+ * belong to the allotment it became part of, so its own live balance says
+ * nothing; the record of what it held is the merge snapshot.
+ */
+export function isMerged(budget: Pick<Budget, "status">): boolean {
+  return budget.status === "merged";
+}
+
+/**
+ * True when the allotment is finished with, whichever way it ended.
+ *
+ * This is the question the working lists ask: a spent-out budget and a merged
+ * one are both gone from the places you choose a budget, even though they are
+ * gone for different reasons.
+ */
+export function isClosed(budget: Pick<Budget, "status">): boolean {
+  return isFullySpent(budget) || isMerged(budget);
+}
+
+/**
  * True once the period has ended.
  *
  * General allotments have no period, so this is never true for them.
@@ -177,7 +220,7 @@ export function isPeriodEnded(budget: Budget, now: Date = new Date()): boolean {
 
 /** True when the budget can fund an expense dated today. */
 export function isActive(budget: Budget, now: Date = new Date()): boolean {
-  return !isFullySpent(budget) && coversDate(budget, todayKey(now));
+  return !isClosed(budget) && coversDate(budget, todayKey(now));
 }
 
 /**
@@ -207,9 +250,14 @@ export function directBudgets<T extends Pick<Budget, "allocationType">>(
  * what the destination's rose.
  */
 export function totalAllotted(
-  budgets: Array<Pick<Budget, "amount" | "allocationType">>,
+  budgets: Array<Pick<Budget, "fundedAmount" | "status">>,
 ): number {
-  return sumAmounts(directBudgets(budgets).map((budget) => budget.amount));
+  return sumAmounts(
+    budgets
+      // A merged allotment's money is inside the one it became part of.
+      .filter((budget) => !isMerged(budget))
+      .map((budget) => budget.fundedAmount),
+  );
 }
 
 /** The allotment this one's money came from, if any. */
@@ -238,9 +286,36 @@ export function budgetFromTransfer(
   return budgets.find((budget) => budget.id === id) ?? null;
 }
 
-/** Open allotments: everything that has not been spent out. */
+/** Open allotments: everything not spent out and not merged away. */
 export function activeBudgets(budgets: Budget[]): Budget[] {
-  return budgets.filter((budget) => !isFullySpent(budget));
+  return budgets.filter((budget) => !isClosed(budget));
+}
+
+/** Allotments folded into another, newest merge first. */
+export function mergedBudgets(budgets: Budget[]): Budget[] {
+  return budgets
+    .filter(isMerged)
+    .sort(
+      (a, b) =>
+        (b.mergedAt ?? "").localeCompare(a.mergedAt ?? "") ||
+        a.id.localeCompare(b.id),
+    );
+}
+
+/** The allotment this one was folded into, if any. */
+export function mergedIntoBudget(
+  budgets: Budget[],
+  budget: Pick<Budget, "mergedIntoBudgetId">,
+): Budget | null {
+  if (!budget.mergedIntoBudgetId) return null;
+  return budgets.find((entry) => entry.id === budget.mergedIntoBudgetId) ?? null;
+}
+
+/** The allotments folded into this one. */
+export function budgetsMergedInto(budgets: Budget[], budgetId: string): Budget[] {
+  return budgets
+    .filter((budget) => budget.mergedIntoBudgetId === budgetId)
+    .sort((a, b) => a.name.localeCompare(b.name) || a.id.localeCompare(b.id));
 }
 
 /** Closed allotments, newest completion first — the archive. */
@@ -339,17 +414,7 @@ export function summarizeBudgetFromTotals(
     transferCount: totals?.transferCount ?? 0,
     // Status needs to know only whether this budget is overspent, which the
     // total already answers — so no expense rows are required here either.
-    status: isFullySpent(budget)
-      ? "fully-spent"
-      : remaining < 0
-        ? "over-budget"
-        : isGeneralBudget(budget)
-          ? "unrestricted"
-          : todayKey(now) < budget.startDate!
-            ? "upcoming"
-            : todayKey(now) > budget.endDate!
-              ? "period-ended"
-              : "active",
+    status: statusFor(budget, remaining, now),
     applicability: budgetApplicability(budget),
     spentRatio:
       budget.amount > 0
@@ -407,9 +472,10 @@ export function sortBudgetsByPeriod(budgets: Budget[]): Budget[] {
  */
 export function budgetsForDate(budgets: Budget[], date: DateKey): Budget[] {
   return budgets
-    // A fully spent allotment has nothing left to give, so it is not merely
-    // hidden from the picker — it is not an option anywhere, at any date.
-    .filter((budget) => !isFullySpent(budget) && coversDate(budget, date))
+    // A closed allotment has nothing left to give — spent out or folded into
+    // another — so it is not merely hidden from the picker; it is not an option
+    // anywhere, at any date.
+    .filter((budget) => !isClosed(budget) && coversDate(budget, date))
     .sort((a, b) => {
       const aGeneral = isGeneralBudget(a);
       const bGeneral = isGeneralBudget(b);
@@ -423,7 +489,7 @@ export function budgetsForDate(budgets: Budget[], date: DateKey): Budget[] {
 
 /** General allotments, which are eligible whatever the expense date. */
 export function generalBudgets(budgets: Budget[]): Budget[] {
-  return budgets.filter((budget) => isGeneralBudget(budget) && !isFullySpent(budget));
+  return budgets.filter((budget) => isGeneralBudget(budget) && !isClosed(budget));
 }
 
 /**
@@ -484,7 +550,7 @@ export function findOverlaps(
         !isGeneralBudget(budget) &&
         // A closed budget cannot take new expenses, so its period cannot clash
         // with anything the user is about to create.
-        !isFullySpent(budget),
+        !isClosed(budget),
     )
     .filter((budget) =>
       rangesOverlap(startDate, endDate, budget.startDate!, budget.endDate!),
@@ -549,6 +615,9 @@ export const ALLOCATION_LABELS: Record<BudgetAllocation, string> = {
   transferred: "Transferred",
 };
 
+/** What a folded-in allotment is called on screen. */
+export const MERGED_LABEL = "Merged";
+
 export const STATUS_LABELS: Record<BudgetStatus, string> = {
   active: "Active",
   upcoming: "Upcoming",
@@ -558,4 +627,5 @@ export const STATUS_LABELS: Record<BudgetStatus, string> = {
   "over-budget": "Over budget",
   unrestricted: NO_DATE_LABEL,
   "fully-spent": FULLY_SPENT_LABEL,
+  merged: MERGED_LABEL,
 };

@@ -15,7 +15,7 @@ import { EditExpenseModal } from "@/components/expenses/EditExpenseModal";
 import { ExpenseItem } from "@/components/expenses/ExpenseItem";
 import { formatCurrency } from "@/lib/currency";
 import { formatDateKey } from "@/lib/dates";
-import { isFullySpent } from "@/lib/budgets";
+import { isFullySpent, isMerged } from "@/lib/budgets";
 
 const SORTS: Array<{ value: ExpenseSort; label: string }> = [
   { value: "newest", label: "Newest" },
@@ -64,6 +64,19 @@ export function ExpenseList({ onAddExpense, onCreateBudget }: ExpenseListProps) 
   /** Expenses charged to a closed allotment are read-only. */
   const lockedBudgetIds = useMemo(
     () => new Set(budgets.filter(isFullySpent).map((budget) => budget.id)),
+    [budgets],
+  );
+
+  /*
+   * Merged allotments are left out of the filter.
+   *
+   * Their expenses moved to the budget they became part of, so picking one
+   * could only ever report "no expenses match" — an option that is guaranteed
+   * to be a dead end is worse than no option. Fully spent budgets stay: they
+   * still hold everything that was charged to them.
+   */
+  const filterableBudgets = useMemo(
+    () => budgets.filter((budget) => !isMerged(budget)),
     [budgets],
   );
 
@@ -122,7 +135,7 @@ export function ExpenseList({ onAddExpense, onCreateBudget }: ExpenseListProps) 
       </div>
 
       {/* Filtering by budget is offered only once there is more than one. */}
-      {budgets.length > 1 ? (
+      {filterableBudgets.length > 1 ? (
         <div className="border-b border-border-subtle px-4 py-2.5 sm:px-5">
           <label className="flex items-center gap-2 text-[0.8125rem] text-muted">
             <span className="whitespace-nowrap">Budget</span>
@@ -136,7 +149,7 @@ export function ExpenseList({ onAddExpense, onCreateBudget }: ExpenseListProps) 
               className="h-9 min-w-0 flex-1 rounded-lg border border-border-subtle bg-surface px-2 text-sm text-foreground transition-colors duration-150 hover:border-border-strong focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-ring"
             >
               <option value="">All allotments</option>
-              {budgets.map((budget) => (
+              {filterableBudgets.map((budget) => (
                 <option key={budget.id} value={budget.id}>
                   {budget.name}
                 </option>

@@ -4,6 +4,8 @@ import {
   budgetPeriodLabel,
   budgetStatusLabel,
   columnWidths,
+  mergeColumnWidths,
+  mergeReportRows,
   buildHistoryReport,
   groupDaysByDate,
   historyReportFilename,
@@ -334,6 +336,103 @@ describe("per-budget accounting in the report", () => {
     // Spending happened only on Aug 5, but the budget runs Aug 1–5.
     expect(week.firstDate).toBe("2026-08-05");
     expect(budgetPeriodLabel(week)).toBe("August 1, 2026 – August 5, 2026");
+  });
+});
+
+describe("budget merges in the report", () => {
+  const merge = {
+    mergedBudgetId: "m1",
+    mergedBudgetName: "Combined Food & Weekend",
+    mergedAt: "2026-08-22T09:00:00.000Z",
+    date: "2026-08-22",
+    sources: [
+      {
+        sourceBudgetId: "b1",
+        sourceName: "Food Budget",
+        amount: 5_000,
+        totalExpenses: 2_000,
+        totalTransferred: 0,
+        remaining: 3_000,
+      },
+      {
+        sourceBudgetId: "b2",
+        sourceName: "Weekend Budget",
+        amount: 3_000,
+        totalExpenses: 1_000,
+        totalTransferred: 0,
+        remaining: 2_000,
+      },
+    ],
+    totalAmount: 8_000,
+    totalExpenses: 3_000,
+    totalTransferred: 0,
+    totalRemaining: 5_000,
+  };
+
+  it("names both sources and what they became", () => {
+    const rows = mergeReportRows(merge);
+
+    expect(rows).toHaveLength(3);
+    expect(rows[0][1]).toBe("From: Food Budget");
+    expect(rows[1][1]).toBe("From: Weekend Budget");
+    expect(rows[2][1]).toBe("Merged into: Combined Food & Weekend");
+  });
+
+  it("reports the combined allocation, spending and remaining", () => {
+    const [, , result] = mergeReportRows(merge);
+    expect(result[2]).toBe("₱8,000.00");
+    expect(result[3]).toBe("₱3,000.00");
+    expect(result[4]).toBe("₱5,000.00");
+  });
+
+  it("dates the merge once rather than on every row", () => {
+    const rows = mergeReportRows(merge);
+    expect(rows[0][0]).toBe("August 22, 2026");
+    expect(rows[1][0]).toBe("");
+    expect(rows[2][0]).toBe("");
+  });
+
+  it("fits the merge table to the page exactly", () => {
+    const A4 = 595.28 - 96;
+    const widths = Object.values(mergeColumnWidths(A4)).map((s) => s.cellWidth);
+    // Every column is fixed, so any remainder is reported as content that could
+    // not be fitted — the total has to land on the page precisely.
+    expect(widths.reduce((a, b) => a + b, 0)).toBeCloseTo(A4, 6);
+    for (const width of widths) expect(width).toBeGreaterThanOrEqual(50);
+  });
+
+  it("renders a report whose only content is a merge", () => {
+    // A period in which nothing was spent but two budgets were combined still
+    // has something to say.
+    const doc = buildHistoryReport({
+      days: [],
+      summary: summarizeHistory([]),
+      merges: [merge],
+      periodLabel: "August 22, 2026",
+      generatedAt,
+    });
+    expect(header(toBytes(doc))).toBe("%PDF-");
+  });
+
+  it("does not add the merge to what was spent", () => {
+    const spent = expense("e1", "b1", "Groceries", 500, "2026-08-22");
+    const days = buildHistory([budget("b1", "Food Budget", 5_000, null)], [spent]);
+    const summary = summarizeHistory(days);
+
+    // ₱8,000 of allotments were combined, and none of it was spending.
+    const doc = buildHistoryReport({
+      days,
+      summary,
+      merges: [merge],
+      periodLabel: "August 22, 2026",
+      generatedAt,
+    });
+
+    expect(header(toBytes(doc))).toBe("%PDF-");
+    expect(summary.totalExpenses).toBe(500);
+    expect(
+      reportSummaryRows(summary).map(([label]) => label),
+    ).not.toContain("Budget Merges");
   });
 });
 

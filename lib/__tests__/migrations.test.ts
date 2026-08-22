@@ -23,6 +23,7 @@ const TABLES = [
   "password_reset_tokens",
   "budgets",
   "expenses",
+  "budget_merges",
 ] as const;
 
 describe("splitStatements", () => {
@@ -169,18 +170,25 @@ describe("003_optional_budget_period", () => {
     );
     const userId = rows[0].id;
 
+    /*
+     * Named, not merely "it threw".
+     *
+     * This assertion once passed for the wrong reason: a new NOT NULL column
+     * made the insert fail before the period check was ever reached, so the
+     * rule under test was no longer being tested at all.
+     */
     await expect(
       db.query(
-        `INSERT INTO budgets (id, user_id, name, amount_centavos, start_date, end_date)
-         VALUES ('b-half', $1, 'Half', 100, '2026-08-01', NULL)`,
+        `INSERT INTO budgets (id, user_id, name, amount_centavos, funded_amount_centavos, start_date, end_date)
+         VALUES ('b-half', $1, 'Half', 100, 100, '2026-08-01', NULL)`,
         [userId],
       ),
-    ).rejects.toBeTruthy();
+    ).rejects.toThrow(/budgets_period_paired/);
 
     // Both null is fine — that is a general allotment.
     await db.query(
-      `INSERT INTO budgets (id, user_id, name, amount_centavos, start_date, end_date)
-       VALUES ('b-general', $1, 'General', 100, NULL, NULL)`,
+      `INSERT INTO budgets (id, user_id, name, amount_centavos, funded_amount_centavos, start_date, end_date)
+       VALUES ('b-general', $1, 'General', 100, 100, NULL, NULL)`,
       [userId],
     );
 
@@ -200,16 +208,16 @@ describe("003_optional_budget_period", () => {
 
     await expect(
       db.query(
-        `INSERT INTO budgets (id, user_id, name, amount_centavos, start_date, end_date)
-         VALUES ('b-fmt', $1, 'Bad', 100, 'not-a-date', 'not-a-date')`,
+        `INSERT INTO budgets (id, user_id, name, amount_centavos, funded_amount_centavos, start_date, end_date)
+         VALUES ('b-fmt', $1, 'Bad', 100, 100, 'not-a-date', 'not-a-date')`,
         [userId],
       ),
     ).rejects.toBeTruthy();
 
     await expect(
       db.query(
-        `INSERT INTO budgets (id, user_id, name, amount_centavos, start_date, end_date)
-         VALUES ('b-order', $1, 'Backwards', 100, '2026-08-05', '2026-08-01')`,
+        `INSERT INTO budgets (id, user_id, name, amount_centavos, funded_amount_centavos, start_date, end_date)
+         VALUES ('b-order', $1, 'Backwards', 100, 100, '2026-08-05', '2026-08-01')`,
         [userId],
       ),
     ).rejects.toBeTruthy();

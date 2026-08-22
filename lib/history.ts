@@ -197,6 +197,7 @@ export function buildHistory(
         budgetEndDate: budget.endDate,
         budgetStatus: budget.status,
         allocationType: budget.allocationType,
+        budgetFundedAmount: budget.fundedAmount,
         sourceBudgetId: budget.sourceBudgetId,
         startingBalance,
         endingBalance,
@@ -293,6 +294,7 @@ export function summarizeHistory(days: HistoryDay[]): HistorySummary {
         budgetEndDate: last.budgetEndDate,
         budgetStatus: last.budgetStatus,
         allocationType: last.allocationType,
+        fundedAmount: last.budgetFundedAmount,
         sourceBudgetId: last.sourceBudgetId,
         totalExpenses: sumAmounts(budgetDays.map((day) => day.totalExpenses)),
         totalTransferred: sumAmounts(budgetDays.map((day) => day.totalTransferred)),
@@ -325,8 +327,8 @@ export function summarizeHistory(days: HistoryDay[]): HistorySummary {
     // report money the user never had.
     totalAllocated: totalAllotted(
       budgetSummaries.map((entry) => ({
-        amount: entry.budgetAmount,
-        allocationType: entry.allocationType,
+        fundedAmount: entry.fundedAmount,
+        status: entry.budgetStatus,
       })),
     ),
     totalExpenses: sumAmounts(budgetSummaries.map((entry) => entry.totalExpenses)),

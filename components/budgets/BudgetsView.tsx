@@ -1,6 +1,6 @@
 "use client";
 
-import { useState } from "react";
+import { useMemo, useState } from "react";
 
 import type { Budget } from "@/types/budget";
 import { useTracker } from "@/components/providers/TrackerProvider";
@@ -11,9 +11,16 @@ import { ConfirmDialog } from "@/components/ui/ConfirmDialog";
 import { BudgetCard } from "@/components/budgets/BudgetCard";
 import { BudgetDetailModal } from "@/components/budgets/BudgetDetailModal";
 import { BudgetFormModal } from "@/components/budgets/BudgetFormModal";
+import { MergeBudgetsModal } from "@/components/budgets/MergeBudgetsModal";
 import { formatCurrency } from "@/lib/currency";
 import { sumAmounts } from "@/lib/calculations";
-import { budgetsFundedBy, isTransferred, totalAllotted } from "@/lib/budgets";
+import type { BudgetMergeSource, BudgetSummary } from "@/types/budget";
+import {
+  budgetsFundedBy,
+  isTransferred,
+  MERGED_LABEL,
+  totalAllotted,
+} from "@/lib/budgets";
 
 function BudgetsSkeleton() {
   return (
@@ -36,6 +43,8 @@ export function BudgetsView() {
     budgets,
     activeBudgetSummaries,
     completedBudgetSummaries,
+    mergedBudgetSummaries,
+    merges,
     deleteBudget,
     isBudgetImmutable,
     getBudgetSummary,
@@ -58,6 +67,17 @@ export function BudgetsView() {
   const { showToast } = useToast();
 
   const [formOpen, setFormOpen] = useState(false);
+  /**
+   * The allotments picked for a merge.
+   *
+   * Selection mode is a separate state rather than a permanent pair of
+   * checkboxes: merging is rare next to viewing and editing, and leaving
+   * checkboxes on every card all the time would make the ordinary case noisier
+   * for the sake of the unusual one.
+   */
+  const [selecting, setSelecting] = useState(false);
+  const [selectedIds, setSelectedIds] = useState<string[]>([]);
+  const [mergeOpen, setMergeOpen] = useState(false);
   const [editing, setEditing] = useState<Budget | null>(null);
   const [viewing, setViewing] = useState<Budget | null>(null);
   const [pendingDelete, setPendingDelete] = useState<Budget | null>(null);
@@ -66,6 +86,29 @@ export function BudgetsView() {
     setEditing(null);
     setFormOpen(true);
   };
+
+  const toggleSelected = (id: string) =>
+    setSelectedIds((current) =>
+      current.includes(id)
+        ? current.filter((entry) => entry !== id)
+        : // Never more than two: the confirmation has to show one sum, and a
+          // three-way merge is a different operation with different arithmetic.
+          current.length >= 2
+          ? current
+          : [...current, id],
+    );
+
+  const stopSelecting = () => {
+    setSelecting(false);
+    setSelectedIds([]);
+  };
+
+  const chosen = selectedIds
+    .map((id) => activeBudgetSummaries.find((entry) => entry.budget.id === id))
+    .filter((entry): entry is BudgetSummary => entry !== undefined);
+
+  const pair: [BudgetSummary, BudgetSummary] | null =
+    chosen.length === 2 ? [chosen[0], chosen[1]] : null;
 
   const openEdit = (budget: Budget) => {
     setEditing(budget);
@@ -100,7 +143,19 @@ export function BudgetsView() {
     activeBudgetSummaries.map((summary) => summary.remaining),
   );
   const hasAny =
-    activeBudgetSummaries.length + completedBudgetSummaries.length > 0;
+    activeBudgetSummaries.length +
+      completedBudgetSummaries.length +
+      mergedBudgetSummaries.length >
+    0;
+
+  /** What each merged allotment held when it was folded in, by source id. */
+  const snapshots = useMemo(() => {
+    const map = new Map<string, BudgetMergeSource>();
+    for (const merge of merges) {
+      for (const source of merge.sources) map.set(source.sourceBudgetId, source);
+    }
+    return map;
+  }, [merges]);
 
   if (!hydrated) {
     return (
@@ -128,21 +183,52 @@ export function BudgetsView() {
             ) : null}
           </div>
 
-          <Button onClick={openCreate}>
-            <svg
-              aria-hidden="true"
-              viewBox="0 0 20 20"
-              fill="none"
-              stroke="currentColor"
-              strokeWidth={2}
-              strokeLinecap="round"
-              className="h-4 w-4"
-            >
-              <path d="M10 4.5v11M4.5 10h11" />
-            </svg>
-            Add Allotment
-          </Button>
+          <div className="flex flex-wrap items-center gap-2">
+            {/* Offered only when there is actually a pair to choose from. */}
+            {activeBudgetSummaries.length > 1 ? (
+              <Button
+                variant="secondary"
+                onClick={() => (selecting ? stopSelecting() : setSelecting(true))}
+              >
+                {selecting ? "Cancel Merge" : "Merge Budgets"}
+              </Button>
+            ) : null}
+
+            {selecting ? null : (
+              <Button onClick={openCreate}>
+                <svg
+                  aria-hidden="true"
+                  viewBox="0 0 20 20"
+                  fill="none"
+                  stroke="currentColor"
+                  strokeWidth={2}
+                  strokeLinecap="round"
+                  className="h-4 w-4"
+                >
+                  <path d="M10 4.5v11M4.5 10h11" />
+                </svg>
+                Add Allotment
+              </Button>
+            )}
+          </div>
         </div>
+
+        {/* A standing instruction while choosing, so the rule is visible rather
+            than discovered by clicking a third card and nothing happening. */}
+        {selecting ? (
+          <div className="flex flex-wrap items-center justify-between gap-3 rounded-2xl border border-border-strong bg-surface-muted p-3.5">
+            <p className="text-[0.8125rem] text-muted-strong">
+              {chosen.length === 0
+                ? "Choose two allotments to merge."
+                : chosen.length === 1
+                  ? `${chosen[0].budget.name} selected — choose one more.`
+                  : `${chosen[0].budget.name} + ${chosen[1].budget.name}`}
+            </p>
+            <Button size="sm" disabled={pair === null} onClick={() => setMergeOpen(true)}>
+              Merge Selected
+            </Button>
+          </div>
+        ) : null}
 
         {!hasAny ? (
           <div className="flex flex-col items-center rounded-2xl border border-border-subtle bg-surface px-6 py-14 text-center shadow-card">
@@ -198,6 +284,17 @@ export function BudgetsView() {
                 sourceName={nameOf(summary.budget.sourceBudgetId)}
                 immutable={isBudgetImmutable(summary.budget)}
                 deletable={canDelete(summary.budget)}
+                selection={
+                  selecting
+                    ? {
+                        selected: selectedIds.includes(summary.budget.id),
+                        disabled:
+                          selectedIds.length >= 2 &&
+                          !selectedIds.includes(summary.budget.id),
+                        onToggle: () => toggleSelected(summary.budget.id),
+                      }
+                    : undefined
+                }
                 onView={() => setViewing(summary.budget)}
                 onEdit={() => openEdit(summary.budget)}
                 onDelete={() => setPendingDelete(summary.budget)}
@@ -212,6 +309,42 @@ export function BudgetsView() {
             accurate. Create a new budget for a new period instead of reopening
             an old one.
           </p>
+        ) : null}
+
+        {/*
+         * Merged allotments get their own section, apart from the fully spent
+         * ones. Both are closed and locked, but they are not the same thing: one
+         * was spent out, the other had its money moved into another allotment,
+         * and lumping them together would suggest the money is gone when it is
+         * not.
+         */}
+        {mergedBudgetSummaries.length > 0 ? (
+          <section aria-labelledby="merged-budgets-heading" className="pt-2">
+            <h2
+              id="merged-budgets-heading"
+              className="text-[0.9375rem] font-semibold tracking-tight text-foreground"
+            >
+              {MERGED_LABEL} Allotments
+            </h2>
+            <p className="mt-1 text-[0.8125rem] text-muted">
+              Folded into another allotment. Their expenses moved with them and
+              are kept in full; these remain as records of what they held.
+            </p>
+
+            <div className="mt-4 grid grid-cols-1 gap-4 sm:grid-cols-2">
+              {mergedBudgetSummaries.map((summary) => (
+                <BudgetCard
+                  key={summary.budget.id}
+                  summary={summary}
+                  sourceName={nameOf(summary.budget.sourceBudgetId)}
+                  mergedIntoName={nameOf(summary.budget.mergedIntoBudgetId)}
+                  snapshot={snapshots.get(summary.budget.id)}
+                  immutable
+                  onView={() => setViewing(summary.budget)}
+                />
+              ))}
+            </div>
+          </section>
         ) : null}
 
         {/*
@@ -271,6 +404,15 @@ export function BudgetsView() {
         onClose={() => {
           setFormOpen(false);
           setEditing(null);
+        }}
+      />
+
+      <MergeBudgetsModal
+        open={mergeOpen && pair !== null}
+        sources={pair}
+        onClose={() => {
+          setMergeOpen(false);
+          stopSelecting();
         }}
       />
 

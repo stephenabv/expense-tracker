@@ -2,7 +2,12 @@ import type { ReactNode } from "react";
 
 import { TrackerProvider } from "@/components/providers/TrackerProvider";
 import { requireUserId } from "@/lib/server/session";
-import { budgetTotals, listBudgets, listExpensesPage } from "@/lib/db/tracker";
+import {
+  budgetTotals,
+  listBudgetMerges,
+  listBudgets,
+  listExpensesPage,
+} from "@/lib/db/tracker";
 import { isDatabaseConfigured } from "@/lib/db/client";
 import { SetupRequired } from "@/components/layout/SetupRequired";
 
@@ -18,18 +23,20 @@ export async function TrackerData({ children }: { children: ReactNode }) {
 
   const userId = await requireUserId();
 
-  // Three small queries rather than one unbounded one: the allotments, their
-  // totals, and the first page of expenses. Nothing here grows with the number
-  // of expenses the account has recorded.
-  const [budgets, totals, firstPage] = await Promise.all([
+  // Four small queries rather than one unbounded one: the allotments, their
+  // totals, what any merges folded together, and the first page of expenses.
+  // Nothing here grows with the number of expenses the account has recorded.
+  const [budgets, totals, merges, firstPage] = await Promise.all([
     listBudgets(userId),
     budgetTotals(userId),
+    listBudgetMerges(userId),
     listExpensesPage(userId, { page: 1 }),
   ]);
 
   return (
     <TrackerProvider
       initialBudgets={budgets}
+      initialMerges={merges}
       initialTotals={totals}
       initialExpenses={firstPage.data}
       initialPagination={firstPage.pagination}

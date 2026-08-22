@@ -8,7 +8,7 @@
  * shows up where it belongs, which a frozen daily snapshot would hide.
  */
 
-import type { BudgetAllocation, BudgetLifecycle } from "@/types/budget";
+import type { BudgetAllocation, BudgetLifecycle, BudgetMerge } from "@/types/budget";
 import type { DateKey } from "@/lib/dates";
 import type { Expense } from "@/types/expense";
 
@@ -36,6 +36,8 @@ export interface HistoryDay {
   budgetStatus: BudgetLifecycle;
   /** Whether that budget was funded directly or by a transfer. */
   allocationType: BudgetAllocation;
+  /** How much of its allotment is money from outside the other allotments. */
+  budgetFundedAmount: number;
   /** The allotment its money came from; `null` when directly allotted. */
   sourceBudgetId: string | null;
   /** That budget's balance entering the day. */
@@ -95,6 +97,8 @@ export interface HistoryBudgetSummary {
   transferCount: number;
   /** Whether this allotment was funded directly or by a transfer. */
   allocationType: BudgetAllocation;
+  /** How much of its allotment is money from outside the other allotments. */
+  fundedAmount: number;
   /** The allotment this one's money came from; `null` when direct. */
   sourceBudgetId: string | null;
   activeDays: number;
@@ -131,4 +135,18 @@ export interface HistorySummary {
   lastDate: DateKey | null;
   /** Per-budget breakdown, newest period first. */
   budgets: HistoryBudgetSummary[];
+}
+
+/**
+ * A merge that happened inside the selected period.
+ *
+ * Reported separately from the days because a merge is not spending — nothing
+ * was bought and no balance moved. It is a structural event, and folding it in
+ * with the expenses would make it look like one.
+ */
+export interface HistoryMerge extends BudgetMerge {
+  /** The name of the allotment the merge produced. */
+  mergedBudgetName: string;
+  /** The calendar day it happened, in the same shape as an expense date. */
+  date: DateKey;
 }
