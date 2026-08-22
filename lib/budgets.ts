@@ -14,6 +14,7 @@
 
 import type {
   Budget,
+  BudgetAllocation,
   BudgetApplicability,
   BudgetInput,
   BudgetStatus,
@@ -31,7 +32,7 @@ import {
   type DateKey,
 } from "@/lib/dates";
 import { roundCurrency } from "@/lib/currency";
-import { calculateTotalExpenses } from "@/lib/calculations";
+import { calculateTotalExpenses, sumAmounts } from "@/lib/calculations";
 
 /** Shown wherever a general allotment's period would otherwise be blank. */
 export const NO_DATE_LABEL = "No Date Restriction";
@@ -89,7 +90,7 @@ export function describeBudgetPeriodLong(
 
 /* ---------------------------------------------------------------- balances */
 
-/** Expenses charged to one budget. */
+/** Every transaction charged to one budget, transfers included. */
 export function expensesForBudget(
   expenses: Expense[],
   budgetId: string,
@@ -97,17 +98,34 @@ export function expensesForBudget(
   return expenses.filter((expense) => expense.budgetId === budgetId);
 }
 
+/** True for money that was spent, as opposed to moved to another allotment. */
+export function isSpending(expense: Pick<Expense, "kind">): boolean {
+  return expense.kind !== "transfer";
+}
+
+/** True for a transaction that moved money into a new allotment. */
+export function isTransfer(expense: Pick<Expense, "kind">): boolean {
+  return expense.kind === "transfer";
+}
+
+/** The allotments this budget's money was moved into. */
+export function transfersFrom(expenses: Expense[], budgetId: string): Expense[] {
+  return expensesForBudget(expenses, budgetId).filter(isTransfer);
+}
+
 /**
- * `Budget Balance = Budget Amount - Total Associated Expenses`
+ * `Budget Balance = Budget Amount - everything charged to it`
  *
- * Only this budget's own expenses are counted.
+ * Both kinds count here. A transfer is not spending, but the money genuinely
+ * left this allotment, so the balance has to fall by it — otherwise the same
+ * pesos would be spendable from two budgets at once.
  */
 export function calculateBudgetRemaining(
   budget: Budget,
   expenses: Expense[],
 ): number {
-  const spent = calculateTotalExpenses(expensesForBudget(expenses, budget.id));
-  return roundCurrency(budget.amount - spent);
+  const out = calculateTotalExpenses(expensesForBudget(expenses, budget.id));
+  return roundCurrency(budget.amount - out);
 }
 
 /**
@@ -162,6 +180,64 @@ export function isActive(budget: Budget, now: Date = new Date()): boolean {
   return !isFullySpent(budget) && coversDate(budget, todayKey(now));
 }
 
+/**
+ * True when this allotment was funded by moving money out of another one.
+ *
+ * Read from the stored allocation type, so the origin survives a rename of
+ * either budget and any later spending from this one.
+ */
+export function isTransferred(budget: Pick<Budget, "allocationType">): boolean {
+  return budget.allocationType === "transferred";
+}
+
+/** Allotments the user funded directly, rather than by moving money. */
+export function directBudgets<T extends Pick<Budget, "allocationType">>(
+  budgets: T[],
+): T[] {
+  return budgets.filter((budget) => !isTransferred(budget));
+}
+
+/**
+ * How much money the user has actually put aside, across allotments.
+ *
+ * Transferred allotments are excluded on purpose. Their pesos were already
+ * counted where they came from, so adding them again would report ₱12,000 for
+ * a person who has ₱10,000 — the transfer would look like it created money.
+ * The *remaining* balances still sum normally: the source's fell by exactly
+ * what the destination's rose.
+ */
+export function totalAllotted(
+  budgets: Array<Pick<Budget, "amount" | "allocationType">>,
+): number {
+  return sumAmounts(directBudgets(budgets).map((budget) => budget.amount));
+}
+
+/** The allotment this one's money came from, if any. */
+export function sourceBudgetOf(
+  budgets: Budget[],
+  budget: Pick<Budget, "sourceBudgetId">,
+): Budget | null {
+  if (!budget.sourceBudgetId) return null;
+  return budgets.find((entry) => entry.id === budget.sourceBudgetId) ?? null;
+}
+
+/** The allotments funded out of this one, oldest first. */
+export function budgetsFundedBy(budgets: Budget[], budgetId: string): Budget[] {
+  return budgets
+    .filter((budget) => budget.sourceBudgetId === budgetId)
+    .sort((a, b) => a.createdAt.localeCompare(b.createdAt) || a.id.localeCompare(b.id));
+}
+
+/** The allotment a transfer transaction created. */
+export function budgetFromTransfer(
+  budgets: Budget[],
+  expense: Pick<Expense, "id" | "transferBudgetId">,
+): Budget | null {
+  const id = expense.transferBudgetId;
+  if (!id) return null;
+  return budgets.find((budget) => budget.id === id) ?? null;
+}
+
 /** Open allotments: everything that has not been spent out. */
 export function activeBudgets(budgets: Budget[]): Budget[] {
   return budgets.filter((budget) => !isFullySpent(budget));
@@ -185,19 +261,28 @@ export function summarizeBudget(
   now: Date = new Date(),
 ): BudgetSummary {
   const own = expensesForBudget(expenses, budget.id);
-  const totalExpenses = calculateTotalExpenses(own);
-  const remaining = roundCurrency(budget.amount - totalExpenses);
+  const spending = own.filter(isSpending);
+  const moved = own.filter(isTransfer);
+
+  const totalExpenses = calculateTotalExpenses(spending);
+  const totalTransferred = calculateTotalExpenses(moved);
+  const totalDeducted = roundCurrency(totalExpenses + totalTransferred);
+  const remaining = roundCurrency(budget.amount - totalDeducted);
 
   return {
     budget,
     totalExpenses,
+    totalTransferred,
+    totalDeducted,
     remaining,
-    expenseCount: own.length,
+    expenseCount: spending.length,
+    transferCount: moved.length,
     status: budgetStatus(budget, expenses, now),
     applicability: budgetApplicability(budget),
+    // The bar shows how much of the allotment is gone, whichever way it went.
     spentRatio:
       budget.amount > 0
-        ? Math.min(Math.max(totalExpenses / budget.amount, 0), 1)
+        ? Math.min(Math.max(totalDeducted / budget.amount, 0), 1)
         : 0,
     isOverspent: remaining < 0,
     durationDays: isGeneralBudget(budget)
@@ -214,11 +299,15 @@ export function summarizeBudgets(
   return budgets.map((budget) => summarizeBudget(budget, expenses, now));
 }
 
-/** One budget's spend, as counted by the database. */
+/** One budget's outgoings, as counted by the database. */
 export interface BudgetTotals {
   budgetId: string;
+  /** Money spent. Transfers are excluded — they are not spending. */
   totalExpenses: number;
+  /** Money moved out into other allotments. */
+  totalTransferred: number;
   expenseCount: number;
+  transferCount: number;
 }
 
 /**
@@ -236,13 +325,18 @@ export function summarizeBudgetFromTotals(
   now: Date = new Date(),
 ): BudgetSummary {
   const totalExpenses = roundCurrency(totals?.totalExpenses ?? 0);
-  const remaining = roundCurrency(budget.amount - totalExpenses);
+  const totalTransferred = roundCurrency(totals?.totalTransferred ?? 0);
+  const totalDeducted = roundCurrency(totalExpenses + totalTransferred);
+  const remaining = roundCurrency(budget.amount - totalDeducted);
 
   return {
     budget,
     totalExpenses,
+    totalTransferred,
+    totalDeducted,
     remaining,
     expenseCount: totals?.expenseCount ?? 0,
+    transferCount: totals?.transferCount ?? 0,
     // Status needs to know only whether this budget is overspent, which the
     // total already answers — so no expense rows are required here either.
     status: isFullySpent(budget)
@@ -259,7 +353,7 @@ export function summarizeBudgetFromTotals(
     applicability: budgetApplicability(budget),
     spentRatio:
       budget.amount > 0
-        ? Math.min(Math.max(totalExpenses / budget.amount, 0), 1)
+        ? Math.min(Math.max(totalDeducted / budget.amount, 0), 1)
         : 0,
     isOverspent: remaining < 0,
     durationDays: isGeneralBudget(budget)
@@ -438,6 +532,22 @@ export function orphanedExpenses(
 
 /** The word shown for a closed budget, in every surface that names the state. */
 export const FULLY_SPENT_LABEL = "Fully Spent";
+
+/**
+ * What a transfer is called on screen.
+ *
+ * "Budget Transfer" is what it is; from the source budget's point of view what
+ * the user sees is money leaving for somewhere else, which is why the row in a
+ * list reads as a deduction rather than as a purchase.
+ */
+export const TRANSFER_LABEL = "Budget Transfer";
+export const TRANSFER_ROW_LABEL = "Deduction from Another Allotment";
+
+/** How a budget's funding is described. */
+export const ALLOCATION_LABELS: Record<BudgetAllocation, string> = {
+  direct: "Direct",
+  transferred: "Transferred",
+};
 
 export const STATUS_LABELS: Record<BudgetStatus, string> = {
   active: "Active",

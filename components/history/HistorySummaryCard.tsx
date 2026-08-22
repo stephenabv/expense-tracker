@@ -2,7 +2,11 @@
 
 import type { HistorySummary } from "@/types/history";
 import { formatCurrency } from "@/lib/currency";
-import { FULLY_SPENT_LABEL, describeBudgetPeriod } from "@/lib/budgets";
+import {
+  ALLOCATION_LABELS,
+  FULLY_SPENT_LABEL,
+  describeBudgetPeriod,
+} from "@/lib/budgets";
 import { cn } from "@/lib/utils";
 
 export interface HistorySummaryCardProps {
@@ -36,6 +40,21 @@ export function HistorySummaryCard({
       value: formatCurrency(summary.totalExpenses),
     },
   ];
+
+  /*
+   * Transfers get their own row, never the expense one.
+   *
+   * A transfer moved money between the user's own pots; adding it to expenses
+   * would report spending that never happened, and adding the destination's
+   * allotment to what was allocated would report money that never existed. The
+   * row appears only when there is something to say.
+   */
+  if (summary.totalTransferred > 0) {
+    rows.push({
+      label: "Transferred Between Allotments",
+      value: formatCurrency(summary.totalTransferred),
+    });
+  }
 
   return (
     <section
@@ -123,14 +142,31 @@ export function HistorySummaryCard({
                     because ₱0.00 remaining on its own does not say whether the
                     budget is finished or merely empty. On its own line, so it
                     never squeezes the name into an ellipsis. */}
-                {entry.budgetStatus === "fully_spent" ? (
+                {entry.budgetStatus === "fully_spent" ||
+                entry.allocationType === "transferred" ? (
                   <p className="mt-0.5 text-[0.8125rem] font-medium text-muted-strong">
-                    <span aria-hidden="true">🔒 </span>
-                    {FULLY_SPENT_LABEL}
+                    {entry.budgetStatus === "fully_spent" ? (
+                      <>
+                        <span aria-hidden="true">🔒 </span>
+                        {FULLY_SPENT_LABEL}
+                      </>
+                    ) : null}
+                    {entry.budgetStatus === "fully_spent" &&
+                    entry.allocationType === "transferred"
+                      ? " · "
+                      : null}
+                    {entry.allocationType === "transferred"
+                      ? ALLOCATION_LABELS.transferred
+                      : null}
                   </p>
                 ) : null}
 
-                <dl className="mt-1 grid grid-cols-3 gap-2 text-[0.8125rem]">
+                <dl
+                  className={cn(
+                    "mt-1 grid gap-2 text-[0.8125rem]",
+                    entry.totalTransferred > 0 ? "grid-cols-4" : "grid-cols-3",
+                  )}
+                >
                   <div>
                     <dt className="text-muted">Budget</dt>
                     <dd className="font-medium tabular text-foreground">
@@ -143,6 +179,16 @@ export function HistorySummaryCard({
                       {formatCurrency(entry.totalExpenses)}
                     </dd>
                   </div>
+                  {/* Never folded into "Spent": the money moved, it was not
+                      consumed, and the two answer different questions. */}
+                  {entry.totalTransferred > 0 ? (
+                    <div>
+                      <dt className="text-muted">Moved</dt>
+                      <dd className="font-medium tabular text-foreground">
+                        {formatCurrency(entry.totalTransferred)}
+                      </dd>
+                    </div>
+                  ) : null}
                   <div>
                     <dt className="text-muted">Remaining</dt>
                     <dd

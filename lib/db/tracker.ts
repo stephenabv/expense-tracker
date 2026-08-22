@@ -11,8 +11,14 @@ import { randomUUID } from "node:crypto";
 
 import { getDatabase, withTransaction, type SqlExecutor } from "@/lib/db/client";
 import { clampPageSize, offsetFor, paginationFor, type Page } from "@/lib/pagination";
-import type { Budget, BudgetInput, BudgetLifecycle } from "@/types/budget";
-import type { Expense, ExpenseInput } from "@/types/expense";
+import type {
+  Budget,
+  BudgetAllocation,
+  BudgetInput,
+  BudgetLifecycle,
+  TransferInput,
+} from "@/types/budget";
+import type { Expense, ExpenseInput, ExpenseKind } from "@/types/expense";
 import { roundCurrency } from "@/lib/currency";
 
 /** Money crosses the boundary as integer centavos. */
@@ -34,6 +40,9 @@ interface BudgetRow {
   locked: boolean;
   status: BudgetLifecycle;
   completed_at: Date | string | null;
+  allocation_type: BudgetAllocation;
+  source_budget_id: string | null;
+  source_transaction_id: string | null;
   created_at: Date | string;
   updated_at: Date | string;
 }
@@ -44,6 +53,14 @@ interface ExpenseRow {
   name: string;
   amount_centavos: string | number;
   expense_date: string;
+  kind: ExpenseKind;
+  /**
+   * The allotment a transfer created, read back from the destination budget.
+   *
+   * Stored on one side only — `budgets.source_transaction_id` — so the link
+   * cannot be recorded in two places and disagree with itself.
+   */
+  transfer_budget_id?: string | null;
   created_at: Date | string;
   updated_at: Date | string;
 }
@@ -63,6 +80,9 @@ function toBudget(row: BudgetRow): Budget {
     locked: row.locked,
     status: row.status,
     completedAt: row.completed_at === null ? null : iso(row.completed_at),
+    allocationType: row.allocation_type,
+    sourceBudgetId: row.source_budget_id,
+    sourceTransactionId: row.source_transaction_id,
     createdAt: iso(row.created_at),
     updatedAt: iso(row.updated_at),
   };
@@ -75,15 +95,32 @@ function toExpense(row: ExpenseRow): Expense {
     name: row.name,
     amount: fromCentavos(row.amount_centavos),
     expenseDate: row.expense_date,
+    kind: row.kind,
+    transferBudgetId: row.transfer_budget_id ?? null,
     createdAt: iso(row.created_at),
     updatedAt: iso(row.updated_at),
   };
 }
 
 const BUDGET_COLUMNS =
-  "id, name, amount_centavos, start_date, end_date, locked, status, completed_at, created_at, updated_at";
+  "id, name, amount_centavos, start_date, end_date, locked, status, completed_at, " +
+  "allocation_type, source_budget_id, source_transaction_id, created_at, updated_at";
+
 const EXPENSE_COLUMNS =
-  "id, budget_id, name, amount_centavos, expense_date, created_at, updated_at";
+  "id, budget_id, name, amount_centavos, expense_date, kind, created_at, updated_at";
+
+/*
+ * Reading expenses back with the allotment each transfer created.
+ *
+ * The link is a correlated lookup, not a stored column: it lives on the budget
+ * the transfer produced, and duplicating it on the transaction would give one
+ * fact two homes that could disagree. Writes use `EXPENSE_COLUMNS` above and
+ * fill the link in from what they just created.
+ */
+const EXPENSE_SELECT =
+  "e.id, e.budget_id, e.name, e.amount_centavos, e.expense_date, e.kind, " +
+  "(SELECT b.id FROM budgets b WHERE b.source_transaction_id = e.id) AS transfer_budget_id, " +
+  "e.created_at, e.updated_at";
 
 /* ----------------------------------------------------------------- budgets */
 
@@ -145,7 +182,14 @@ export type WriteRefusal =
   /** The budget is fully spent, so it and its expenses are immutable. */
   | "locked"
   /** The amount exceeds what the budget has left. */
-  | "insufficient";
+  | "insufficient"
+  /**
+   * The row is a committed budget transfer, or an allotment one created.
+   * Changing either would move money that has already been accounted for.
+   */
+  | "transfer"
+  /** The budget funded another allotment, so deleting it would strand it. */
+  | "has-transfers";
 
 export type WriteResult<T> =
   | ({ ok: true } & T)
@@ -155,6 +199,7 @@ interface LockedBudget {
   id: string;
   amount_centavos: string | number;
   status: BudgetLifecycle;
+  allocation_type: BudgetAllocation;
 }
 
 /**
@@ -171,7 +216,7 @@ async function lockBudget(
   budgetId: string,
 ): Promise<LockedBudget | null> {
   const { rows } = await tx.query<LockedBudget>(
-    `SELECT id, amount_centavos, status
+    `SELECT id, amount_centavos, status, allocation_type
        FROM budgets
       WHERE id = $1 AND user_id = $2
         FOR UPDATE`,
@@ -217,13 +262,13 @@ async function settleBudget(
   budgetId: string,
 ): Promise<Budget | null> {
   const { rows } = await tx.query<
-    BudgetRow & { spent_centavos: string | number; expense_count: string | number }
+    BudgetRow & { out_centavos: string | number; out_count: string | number }
   >(
     `SELECT ${BUDGET_COLUMNS},
             (SELECT COALESCE(SUM(amount_centavos), 0) FROM expenses e WHERE e.budget_id = budgets.id)
-              AS spent_centavos,
+              AS out_centavos,
             (SELECT COUNT(*) FROM expenses e WHERE e.budget_id = budgets.id)
-              AS expense_count
+              AS out_count
        FROM budgets
       WHERE id = $1 AND user_id = $2`,
     [budgetId, userId],
@@ -233,8 +278,10 @@ async function settleBudget(
   if (!row) return null;
   if (row.status === "fully_spent") return toBudget(row);
 
-  const remaining = Number(row.amount_centavos) - Number(row.spent_centavos);
-  if (remaining !== 0 || Number(row.expense_count) === 0) return toBudget(row);
+  // Transfers count here as well as expenses: the money left the budget either
+  // way, so moving the last peso out closes it exactly as spending it would.
+  const remaining = Number(row.amount_centavos) - Number(row.out_centavos);
+  if (remaining !== 0 || Number(row.out_count) === 0) return toBudget(row);
 
   const { rows: closed } = await tx.query<BudgetRow>(
     `UPDATE budgets
@@ -264,6 +311,21 @@ export async function updateBudgetRow(
     if (!locked) return { ok: false as const, reason: "not-found" as const };
     if (locked.status === "fully_spent") {
       return { ok: false as const, reason: "locked" as const };
+    }
+
+    /*
+     * A transferred allotment's amount is the transfer that funded it.
+     *
+     * Editing it here would create or destroy money without a matching
+     * deduction anywhere: the source gave up exactly this much, and no edit on
+     * this side can change what already left. Its name and dates stay editable,
+     * so a mistyped label is still fixable.
+     */
+    if (
+      locked.allocation_type === "transferred" &&
+      toCentavos(input.amount) !== Number(locked.amount_centavos)
+    ) {
+      return { ok: false as const, reason: "transfer" as const };
     }
 
     await tx.query(
@@ -312,20 +374,48 @@ export async function setBudgetLockedRow(
   return { ok: false, reason: await refusalFor(db, userId, budgetId) };
 }
 
+/**
+ * Deletes a budget, unless doing so would rewrite a transfer.
+ *
+ * Two cases are refused beyond the fully spent one. A budget that funded
+ * another allotment cannot go, because the destination's money would have no
+ * origin — and the database says so too, through a RESTRICT foreign key. A
+ * transferred allotment cannot go either: its money was deducted from the
+ * source, so deleting it would make those pesos vanish rather than return.
+ */
 export async function deleteBudgetRow(
   userId: string,
   budgetId: string,
   db: SqlExecutor = getDatabase(),
 ): Promise<WriteResult<{ id: string }>> {
-  const { rows } = await db.query<{ id: string }>(
-    `DELETE FROM budgets
-      WHERE id = $2 AND user_id = $1 AND status = 'active'
-      RETURNING id`,
-    [userId, budgetId],
-  );
+  return withTransaction(db, async (tx) => {
+    const locked = await lockBudget(tx, userId, budgetId);
+    if (!locked) return { ok: false as const, reason: "not-found" as const };
+    if (locked.status === "fully_spent") {
+      return { ok: false as const, reason: "locked" as const };
+    }
+    if (locked.allocation_type === "transferred") {
+      return { ok: false as const, reason: "transfer" as const };
+    }
 
-  if (rows[0]) return { ok: true, id: rows[0].id };
-  return { ok: false, reason: await refusalFor(db, userId, budgetId) };
+    const { rows: funded } = await tx.query<{ id: string }>(
+      `SELECT id FROM budgets WHERE source_budget_id = $1 LIMIT 1`,
+      [budgetId],
+    );
+    if (funded.length > 0) {
+      return { ok: false as const, reason: "has-transfers" as const };
+    }
+
+    const { rows } = await tx.query<{ id: string }>(
+      `DELETE FROM budgets
+        WHERE id = $2 AND user_id = $1 AND status = 'active'
+        RETURNING id`,
+      [userId, budgetId],
+    );
+
+    if (rows[0]) return { ok: true as const, id: rows[0].id };
+    return { ok: false as const, reason: "not-found" as const };
+  });
 }
 
 /**
@@ -354,9 +444,9 @@ export async function listExpenses(
   db: SqlExecutor = getDatabase(),
 ): Promise<Expense[]> {
   const { rows } = await db.query<ExpenseRow>(
-    `SELECT ${EXPENSE_COLUMNS} FROM expenses
-      WHERE user_id = $1
-      ORDER BY expense_date DESC, created_at DESC, id`,
+    `SELECT ${EXPENSE_SELECT} FROM expenses e
+      WHERE e.user_id = $1
+      ORDER BY e.expense_date DESC, e.created_at DESC, e.id`,
     [userId],
   );
   return rows.map(toExpense);
@@ -396,8 +486,8 @@ export async function insertExpense(
     }
 
     const { rows } = await tx.query<ExpenseRow>(
-      `INSERT INTO expenses (id, user_id, budget_id, name, amount_centavos, expense_date)
-       VALUES ($1, $2, $3, $4, $5, $6)
+      `INSERT INTO expenses (id, user_id, budget_id, name, amount_centavos, expense_date, kind)
+       VALUES ($1, $2, $3, $4, $5, $6, 'expense')
        RETURNING ${EXPENSE_COLUMNS}`,
       [randomUUID(), userId, input.budgetId, input.name, amount, input.expenseDate],
     );
@@ -426,11 +516,23 @@ export async function updateExpenseRow(
   const amount = toCentavos(input.amount);
 
   return withTransaction(db, async (tx) => {
-    const { rows: current } = await tx.query<{ budget_id: string }>(
-      `SELECT budget_id FROM expenses WHERE id = $1 AND user_id = $2`,
+    const { rows: current } = await tx.query<{ budget_id: string; kind: ExpenseKind }>(
+      `SELECT budget_id, kind FROM expenses WHERE id = $1 AND user_id = $2`,
       [expenseId, userId],
     );
     if (!current[0]) return { ok: false as const, reason: "not-found" as const };
+
+    /*
+     * A transfer is a committed movement of money, not a line item.
+     *
+     * Its amount is the destination allotment's entire funding and its source
+     * is where that funding came from; editing either would leave one side of
+     * a two-sided transaction rewritten. Corrections belong in a new
+     * transaction, not on top of this one.
+     */
+    if (current[0].kind === "transfer") {
+      return { ok: false as const, reason: "transfer" as const };
+    }
 
     const previousBudgetId = current[0].budget_id;
 
@@ -495,11 +597,17 @@ export async function deleteExpenseRow(
   db: SqlExecutor = getDatabase(),
 ): Promise<WriteResult<{ id: string }>> {
   return withTransaction(db, async (tx) => {
-    const { rows: current } = await tx.query<{ budget_id: string }>(
-      `SELECT budget_id FROM expenses WHERE id = $1 AND user_id = $2`,
+    const { rows: current } = await tx.query<{ budget_id: string; kind: ExpenseKind }>(
+      `SELECT budget_id, kind FROM expenses WHERE id = $1 AND user_id = $2`,
       [expenseId, userId],
     );
     if (!current[0]) return { ok: false as const, reason: "not-found" as const };
+
+    // Deleting the transfer would leave the allotment it funded with money that
+    // came from nowhere.
+    if (current[0].kind === "transfer") {
+      return { ok: false as const, reason: "transfer" as const };
+    }
 
     const budget = await lockBudget(tx, userId, current[0].budget_id);
     if (!budget) return { ok: false as const, reason: "not-found" as const };
@@ -519,46 +627,160 @@ export async function deleteExpenseRow(
 }
 
 
+/**
+ * Moves money out of one allotment and into a new one.
+ *
+ * Both halves happen in a single transaction under the source's row lock. That
+ * is what makes the operation honest: there is no instant at which the source
+ * has been debited but the destination does not exist, and none at which an
+ * allotment holds money nothing was deducted for. If any step throws, the
+ * source's balance is exactly what it was.
+ *
+ * The destination is created with its own period, so from the moment it exists
+ * it behaves like any other allotment — it can fund expenses, it can be spent
+ * out, and it can itself be a source.
+ */
+export async function insertTransfer(
+  userId: string,
+  input: TransferInput,
+  db: SqlExecutor = getDatabase(),
+): Promise<
+  WriteResult<{ transfer: Expense; source: Budget; destination: Budget }>
+> {
+  const amount = toCentavos(input.amount);
+
+  return withTransaction(db, async (tx) => {
+    const source = await lockBudget(tx, userId, input.sourceBudgetId);
+    // Another account's budget is simply not found; the caller learns nothing
+    // about whether it exists.
+    if (!source) return { ok: false as const, reason: "not-found" as const };
+    if (source.status === "fully_spent") {
+      return { ok: false as const, reason: "locked" as const };
+    }
+
+    const remaining = Number(source.amount_centavos) - (await spentOn(tx, source.id));
+    if (amount > remaining) {
+      return {
+        ok: false as const,
+        reason: "insufficient" as const,
+        remaining: fromCentavos(remaining),
+      };
+    }
+
+    // The deduction is recorded first, so the allotment it creates can point
+    // back at the transaction that paid for it.
+    const transferId = randomUUID();
+    const { rows: recorded } = await tx.query<ExpenseRow>(
+      `INSERT INTO expenses (id, user_id, budget_id, name, amount_centavos, expense_date, kind)
+       VALUES ($1, $2, $3, $4, $5, $6, 'transfer')
+       RETURNING ${EXPENSE_COLUMNS}`,
+      [transferId, userId, source.id, input.name, amount, input.expenseDate],
+    );
+
+    const destinationId = randomUUID();
+    const { rows: created } = await tx.query<BudgetRow>(
+      `INSERT INTO budgets
+         (id, user_id, name, amount_centavos, start_date, end_date, locked,
+          allocation_type, source_budget_id, source_transaction_id)
+       VALUES ($1, $2, $3, $4, $5, $6, true, 'transferred', $7, $8)
+       RETURNING ${BUDGET_COLUMNS}`,
+      [
+        destinationId,
+        userId,
+        input.name,
+        amount,
+        input.startDate,
+        input.endDate,
+        source.id,
+        transferId,
+      ],
+    );
+
+    // Moving out the last peso closes the source, exactly as spending it would.
+    const settled = await settleBudget(tx, userId, source.id);
+    if (!settled) return { ok: false as const, reason: "not-found" as const };
+
+    return {
+      ok: true as const,
+      // The link is filled in from what was just created rather than re-read.
+      transfer: { ...toExpense(recorded[0]), transferBudgetId: destinationId },
+      source: settled,
+      destination: toBudget(created[0]),
+    };
+  });
+}
+
 /* ------------------------------------------------- aggregates and paging -- */
 
-/** One budget's spend, computed by the database rather than in the browser. */
+/**
+ * One budget's outgoings, computed by the database rather than in the browser.
+ *
+ * Spending and transfers are counted apart because they answer different
+ * questions. Both reduce the balance — the money left either way — but only
+ * spending is spending, and a report that added a transfer to the expense
+ * total would show a purchase that never happened.
+ */
 export interface BudgetTotal {
   budgetId: string;
   totalExpenses: number;
+  totalTransferred: number;
   expenseCount: number;
+  transferCount: number;
+}
+
+interface TotalsRow {
+  budget_id: string;
+  expense_centavos: string | number;
+  transfer_centavos: string | number;
+  expense_count: string | number;
+  transfer_count: string | number;
+}
+
+/*
+ * One pass, two sums.
+ *
+ * FILTER splits the group without a second scan of the table, so the extra
+ * figure costs nothing next to the single sum this replaced.
+ */
+const TOTALS_COLUMNS = `budget_id,
+            COALESCE(SUM(amount_centavos) FILTER (WHERE kind <> 'transfer'), 0)
+              AS expense_centavos,
+            COALESCE(SUM(amount_centavos) FILTER (WHERE kind = 'transfer'), 0)
+              AS transfer_centavos,
+            COUNT(*) FILTER (WHERE kind <> 'transfer') AS expense_count,
+            COUNT(*) FILTER (WHERE kind = 'transfer') AS transfer_count`;
+
+function toTotals(row: TotalsRow): BudgetTotal {
+  return {
+    budgetId: row.budget_id,
+    totalExpenses: fromCentavos(row.expense_centavos),
+    totalTransferred: fromCentavos(row.transfer_centavos),
+    expenseCount: Number(row.expense_count),
+    transferCount: Number(row.transfer_count),
+  };
 }
 
 /**
  * Per-budget totals for one user.
  *
  * This is what lets the expense list be paginated. A balance is
- * `amount − SUM(expenses)`, and summing in SQL means the client never has to
- * hold every row to know what a budget has left — one small result set instead
- * of an unbounded one.
+ * `amount − SUM(everything charged)`, and summing in SQL means the client never
+ * has to hold every row to know what a budget has left — one small result set
+ * instead of an unbounded one.
  */
 export async function budgetTotals(
   userId: string,
   db: SqlExecutor = getDatabase(),
 ): Promise<BudgetTotal[]> {
-  const { rows } = await db.query<{
-    budget_id: string;
-    total_centavos: string | number;
-    expense_count: string | number;
-  }>(
-    `SELECT budget_id,
-            COALESCE(SUM(amount_centavos), 0) AS total_centavos,
-            COUNT(*) AS expense_count
+  const { rows } = await db.query<TotalsRow>(
+    `SELECT ${TOTALS_COLUMNS}
        FROM expenses
       WHERE user_id = $1
       GROUP BY budget_id`,
     [userId],
   );
 
-  return rows.map((row) => ({
-    budgetId: row.budget_id,
-    totalExpenses: fromCentavos(row.total_centavos),
-    expenseCount: Number(row.expense_count),
-  }));
+  return rows.map(toTotals);
 }
 
 /**
@@ -575,25 +797,15 @@ export async function budgetTotalsBefore(
   beforeDate: string,
   db: SqlExecutor = getDatabase(),
 ): Promise<BudgetTotal[]> {
-  const { rows } = await db.query<{
-    budget_id: string;
-    total_centavos: string | number;
-    expense_count: string | number;
-  }>(
-    `SELECT budget_id,
-            COALESCE(SUM(amount_centavos), 0) AS total_centavos,
-            COUNT(*) AS expense_count
+  const { rows } = await db.query<TotalsRow>(
+    `SELECT ${TOTALS_COLUMNS}
        FROM expenses
       WHERE user_id = $1 AND expense_date < $2
       GROUP BY budget_id`,
     [userId, beforeDate],
   );
 
-  return rows.map((row) => ({
-    budgetId: row.budget_id,
-    totalExpenses: fromCentavos(row.total_centavos),
-    expenseCount: Number(row.expense_count),
-  }));
+  return rows.map(toTotals);
 }
 
 /** How a list of expenses is ordered. Applied in SQL, across the whole set. */
@@ -667,7 +879,7 @@ export async function listExpensesPage(
   if (totalItems === 0) return { data: [], pagination };
 
   const { rows } = await db.query<ExpenseRow>(
-    `SELECT ${EXPENSE_COLUMNS} FROM expenses
+    `SELECT ${EXPENSE_SELECT} FROM expenses e
       WHERE ${where}
       ORDER BY ${order}
       LIMIT $${params.length + 1} OFFSET $${params.length + 2}`,
@@ -700,9 +912,9 @@ export async function listExpensesMatching(
   }
 
   const { rows } = await db.query<ExpenseRow>(
-    `SELECT ${EXPENSE_COLUMNS} FROM expenses
+    `SELECT ${EXPENSE_SELECT} FROM expenses e
       WHERE ${conditions.join(" AND ")}
-      ORDER BY expense_date DESC, created_at DESC, id`,
+      ORDER BY e.expense_date DESC, e.created_at DESC, e.id`,
     params,
   );
 

@@ -27,7 +27,12 @@ import {
   type ReactNode,
 } from "react";
 
-import type { Budget, BudgetInput, BudgetSummary } from "@/types/budget";
+import type {
+  Budget,
+  BudgetInput,
+  BudgetSummary,
+  TransferInput,
+} from "@/types/budget";
 import type { Expense, ExpenseInput } from "@/types/expense";
 import {
   budgetsForDate,
@@ -51,6 +56,7 @@ import {
   budgetTotalsAction,
   createBudgetAction,
   createExpenseAction,
+  createTransferAction,
   deleteBudgetAction,
   deleteExpenseAction,
   listBudgetsAction,
@@ -118,6 +124,12 @@ interface TrackerContextValue {
   addExpense: (input: ExpenseInput) => Promise<ExpenseWriteOutcome>;
   updateExpense: (id: string, input: ExpenseInput) => Promise<ExpenseWriteOutcome>;
   deleteExpense: (id: string) => Promise<boolean>;
+  /**
+   * Moves money out of one allotment into a new one. `destination` is the
+   * allotment created, so the caller can name it; `completed` is set when the
+   * transfer took the source's last peso.
+   */
+  createTransfer: (input: TransferInput) => Promise<TransferWriteOutcome>;
 
   getBudget: (id: string) => Budget | null;
   getBudgetSummary: (id: string) => BudgetSummary | null;
@@ -138,6 +150,11 @@ export interface ExpenseWriteOutcome {
   saved: boolean;
   /** The budget this write spent out, if any. */
   completed: Budget | null;
+}
+
+/** The result of a transfer: what it created, and what it may have closed. */
+export interface TransferWriteOutcome extends ExpenseWriteOutcome {
+  destination: Budget | null;
 }
 
 const TrackerContext = createContext<TrackerContextValue | null>(null);
@@ -372,6 +389,24 @@ export function TrackerProvider({
     [fail, justClosed, refresh, track],
   );
 
+  const createTransfer = useCallback(
+    (input: TransferInput) =>
+      track(async (): Promise<TransferWriteOutcome> => {
+        const result = await createTransferAction(input);
+        if (!result.ok) {
+          fail(result.error);
+          return { saved: false, completed: null, destination: null };
+        }
+
+        // Whether the source closed is decided against the budgets held before
+        // the refresh below replaces them.
+        const completed = justClosed(input.sourceBudgetId, result.data.source);
+        await refresh();
+        return { saved: true, completed, destination: result.data.destination };
+      }),
+    [fail, justClosed, refresh, track],
+  );
+
   const deleteExpense = useCallback(
     (id: string) =>
       track(async () => {
@@ -469,6 +504,7 @@ export function TrackerProvider({
       addExpense,
       updateExpense,
       deleteExpense,
+      createTransfer,
       getBudget,
       getBudgetSummary,
       budgetsCovering,
@@ -495,6 +531,7 @@ export function TrackerProvider({
       addExpense,
       updateExpense,
       deleteExpense,
+      createTransfer,
       getBudget,
       getBudgetSummary,
       budgetsCovering,

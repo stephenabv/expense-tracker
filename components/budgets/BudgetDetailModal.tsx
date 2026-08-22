@@ -12,7 +12,14 @@ import { Button } from "@/components/ui/Button";
 import { BudgetStatusBadge } from "@/components/budgets/BudgetStatusBadge";
 import { formatCurrency } from "@/lib/currency";
 import { formatDateKey } from "@/lib/dates";
-import { describeBudgetPeriodLong, isFullySpent } from "@/lib/budgets";
+import {
+  ALLOCATION_LABELS,
+  budgetsFundedBy,
+  describeBudgetPeriodLong,
+  isFullySpent,
+  isTransferred,
+  sourceBudgetOf,
+} from "@/lib/budgets";
 import { cn } from "@/lib/utils";
 
 export interface BudgetDetailModalProps {
@@ -23,7 +30,7 @@ export interface BudgetDetailModalProps {
 
 /** Read-only view of one allotment and the expenses charged to it. */
 export function BudgetDetailModal({ open, onClose, budget }: BudgetDetailModalProps) {
-  const { getBudgetSummary } = useTracker();
+  const { getBudgetSummary, budgets } = useTracker();
 
   const summary = budget ? getBudgetSummary(budget.id) : null;
 
@@ -58,6 +65,8 @@ export function BudgetDetailModal({ open, onClose, budget }: BudgetDetailModalPr
   if (!budget || !summary) return null;
 
   const closed = isFullySpent(budget);
+  const source = sourceBudgetOf(budgets, budget);
+  const funded = budgetsFundedBy(budgets, budget.id);
 
   return (
     <Modal
@@ -107,6 +116,17 @@ export function BudgetDetailModal({ open, onClose, budget }: BudgetDetailModalPr
               {formatCurrency(summary.totalExpenses)}
             </dd>
           </div>
+          {/* Money moved out is reported on its own line, never folded into
+              "Spent": the user did not buy anything with it. */}
+          {summary.totalTransferred > 0 ? (
+            <div className="flex items-baseline justify-between gap-4">
+              <dt className="text-sm text-muted">Transferred out</dt>
+              <dd className="font-semibold tabular text-foreground">
+                {formatCurrency(summary.totalTransferred)}
+              </dd>
+            </div>
+          ) : null}
+
           <div className="flex items-baseline justify-between gap-4 border-t border-border-subtle pt-2.5">
             <dt className="text-sm text-muted">Remaining</dt>
             <dd
@@ -120,9 +140,62 @@ export function BudgetDetailModal({ open, onClose, budget }: BudgetDetailModalPr
           </div>
         </dl>
 
+        {/* Where this allotment's money came from. Traceable in both
+            directions: a destination names its source, and a source lists what
+            it funded. */}
+        {isTransferred(budget) ? (
+          <dl className="space-y-2.5 rounded-xl border border-border-subtle p-4">
+            <div className="flex items-baseline justify-between gap-4">
+              <dt className="text-sm text-muted">Allocation Type</dt>
+              <dd className="text-sm font-medium text-foreground">
+                {ALLOCATION_LABELS[budget.allocationType]}
+              </dd>
+            </div>
+            <div className="flex items-baseline justify-between gap-4">
+              <dt className="text-sm text-muted">Source</dt>
+              <dd className="truncate text-sm font-medium text-foreground">
+                {source?.name ?? "—"}
+              </dd>
+            </div>
+            <div className="flex items-baseline justify-between gap-4">
+              <dt className="text-sm text-muted">Transferred Amount</dt>
+              <dd className="font-semibold tabular text-foreground">
+                {formatCurrency(budget.amount)}
+              </dd>
+            </div>
+            <div className="flex items-baseline justify-between gap-4">
+              <dt className="text-sm text-muted">Created</dt>
+              <dd className="text-sm font-medium text-foreground">
+                {formatDateKey(budget.createdAt.slice(0, 10))}
+              </dd>
+            </div>
+          </dl>
+        ) : null}
+
+        {funded.length > 0 ? (
+          <div className="rounded-xl border border-border-subtle p-4">
+            <h3 className="text-sm font-semibold text-foreground">
+              Allotments funded from this budget
+            </h3>
+            <ul className="mt-2 space-y-1.5">
+              {funded.map((entry) => (
+                <li
+                  key={entry.id}
+                  className="flex items-baseline justify-between gap-4 text-[0.8125rem]"
+                >
+                  <span className="truncate text-muted-strong">{entry.name}</span>
+                  <span className="shrink-0 font-medium tabular text-foreground">
+                    {formatCurrency(entry.amount)}
+                  </span>
+                </li>
+              ))}
+            </ul>
+          </div>
+        ) : null}
+
         <div>
           <h3 className="text-sm font-semibold text-foreground">
-            Expenses in this budget
+            Transactions in this budget
           </h3>
 
           {loading ? (

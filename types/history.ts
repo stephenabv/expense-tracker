@@ -8,7 +8,7 @@
  * shows up where it belongs, which a frozen daily snapshot would hide.
  */
 
-import type { BudgetLifecycle } from "@/types/budget";
+import type { BudgetAllocation, BudgetLifecycle } from "@/types/budget";
 import type { DateKey } from "@/lib/dates";
 import type { Expense } from "@/types/expense";
 
@@ -34,13 +34,19 @@ export interface HistoryDay {
    * which, and the two mean very different things.
    */
   budgetStatus: BudgetLifecycle;
+  /** Whether that budget was funded directly or by a transfer. */
+  allocationType: BudgetAllocation;
+  /** The allotment its money came from; `null` when directly allotted. */
+  sourceBudgetId: string | null;
   /** That budget's balance entering the day. */
   startingBalance: number;
   /** That budget's balance after the day: `startingBalance - totalExpenses`. */
   endingBalance: number;
-  /** Sum of this day's expenses within this budget. */
+  /** Money actually spent that day from this budget. */
   totalExpenses: number;
-  /** Expenses recorded that day for that budget, newest first. */
+  /** Money moved that day out of this budget into new allotments. */
+  totalTransferred: number;
+  /** Transactions recorded that day for that budget, newest first. */
   expenses: Expense[];
 }
 
@@ -79,11 +85,18 @@ export interface HistoryBudgetSummary {
   budgetEndDate: DateKey | null;
   /** Open, or spent out and closed. */
   budgetStatus: BudgetLifecycle;
-  /** Spend inside the selected period only. */
+  /** Spend inside the selected period only. Transfers are not spend. */
   totalExpenses: number;
+  /** Money moved out into other allotments inside the period. */
+  totalTransferred: number;
   /** The budget's balance after the last in-range day. */
   remaining: number;
   expenseCount: number;
+  transferCount: number;
+  /** Whether this allotment was funded directly or by a transfer. */
+  allocationType: BudgetAllocation;
+  /** The allotment this one's money came from; `null` when direct. */
+  sourceBudgetId: string | null;
   activeDays: number;
   firstDate: DateKey;
   lastDate: DateKey;
@@ -97,10 +110,17 @@ export interface HistoryBudgetSummary {
  * point-in-time values.
  */
 export interface HistorySummary {
-  /** Sum of the allotments of every budget appearing in range. */
+  /**
+   * Sum of the allotments of every budget appearing in range.
+   *
+   * Transferred allotments are excluded: their money was already counted where
+   * it came from, and adding it again would report funds that never existed.
+   */
   totalAllocated: number;
-  /** Sum of the expenses inside the range. */
+  /** Sum of the expenses inside the range. Transfers are not counted. */
   totalExpenses: number;
+  /** Money moved between allotments inside the range. */
+  totalTransferred: number;
   /** Sum of each budget's remaining balance as of its last in-range day. */
   totalRemaining: number;
   expenseCount: number;

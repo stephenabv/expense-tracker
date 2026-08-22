@@ -13,7 +13,12 @@ import type { HistoryDay, HistorySummary } from "@/types/history";
 import { formatCurrency } from "@/lib/currency";
 import { sumAmounts } from "@/lib/calculations";
 import { formatDateKey } from "@/lib/dates";
-import { FULLY_SPENT_LABEL, NO_DATE_PERIOD_LABEL } from "@/lib/budgets";
+import {
+  ALLOCATION_LABELS,
+  FULLY_SPENT_LABEL,
+  NO_DATE_PERIOD_LABEL,
+  TRANSFER_ROW_LABEL,
+} from "@/lib/budgets";
 import {
   PDF_FONT_BOLD_BASE64,
   PDF_FONT_NAME,
@@ -76,10 +81,76 @@ export function budgetStatusLabel(entry: {
   return entry.budgetStatus === "fully_spent" ? FULLY_SPENT_LABEL : "Active";
 }
 
+/**
+ * Column widths for the budget summary table.
+ *
+ * The shares are chosen so every money column fits `₱00,000.00` at 9pt without
+ * wrapping, and whatever is left goes to the two text columns, which can wrap.
+ */
+export function columnWidths(
+  contentWidth: number,
+  withMoved: boolean,
+): Record<
+  number,
+  {
+    cellWidth: number;
+    halign?: "right";
+    fontStyle?: "bold";
+    textColor?: string;
+    fontSize?: number;
+  }
+> {
+  /*
+   * The widths must add up to the available width *exactly*.
+   *
+   * Every column here has a fixed width, so autoTable has nothing left to
+   * stretch or squeeze; any remainder — over or under — is reported as content
+   * that could not be fitted. The page is 595.28pt wide, so shares of it are
+   * fractional, and the name column absorbs whatever is left over rather than
+   * being another rounded fraction that leaves a gap.
+   */
+  const share = (fraction: number) => Math.floor(contentWidth * fraction);
+  const nameColumn = (rest: number[]) =>
+    contentWidth - rest.reduce((sum, width) => sum + width, 0);
+
+  if (withMoved) {
+    const rest = [
+      share(0.17),
+      share(0.11),
+      share(0.13),
+      share(0.13),
+      share(0.12),
+      share(0.13),
+    ];
+    return {
+      0: { cellWidth: nameColumn(rest), fontStyle: "bold" },
+      1: { cellWidth: rest[0], textColor: MUTED, fontSize: 8 },
+      2: { cellWidth: rest[1], textColor: MUTED, fontSize: 8 },
+      3: { cellWidth: rest[2], halign: "right", fontSize: 8.5 },
+      4: { cellWidth: rest[3], halign: "right", fontSize: 8.5 },
+      5: { cellWidth: rest[4], halign: "right", textColor: MUTED, fontSize: 8.5 },
+      6: { cellWidth: rest[5], halign: "right", fontStyle: "bold", fontSize: 8.5 },
+    };
+  }
+
+  const rest = [share(0.21), share(0.12), share(0.14), share(0.14), share(0.14)];
+  return {
+    0: { cellWidth: nameColumn(rest), fontStyle: "bold" },
+    1: { cellWidth: rest[0], textColor: MUTED, fontSize: 8.5 },
+    2: { cellWidth: rest[1], textColor: MUTED, fontSize: 8.5 },
+    3: { cellWidth: rest[2], halign: "right" },
+    4: { cellWidth: rest[3], halign: "right" },
+    5: { cellWidth: rest[4], halign: "right", fontStyle: "bold" },
+  };
+}
+
 interface DateGroup {
   date: string;
   entries: HistoryDay[];
+  /** Everything charged that day, spending and transfers together. */
   total: number;
+  /** How much of `total` moved to another allotment rather than being spent. */
+  transferred: number;
   expenseCount: number;
 }
 
@@ -103,7 +174,13 @@ export function groupDaysByDate(input: HistoryDay[]): DateGroup[] {
     return {
       date,
       entries,
-      total: sumAmounts(entries.map((entry) => entry.totalExpenses)),
+      // Everything that left a budget that day, so the header reconciles with
+      // the per-budget feet below it. `transferred` says how much of it moved
+      // rather than being spent.
+      total: sumAmounts(
+        entries.map((entry) => entry.totalExpenses + entry.totalTransferred),
+      ),
+      transferred: sumAmounts(entries.map((entry) => entry.totalTransferred)),
       expenseCount: entries.reduce((sum, entry) => sum + entry.expenses.length, 0),
     };
   });
@@ -199,13 +276,46 @@ function paintFooters(doc: jsPDF, generatedAt: Date): void {
 export function reportSummaryRows(
   summary: HistorySummary,
 ): Array<[string, string]> {
-  return [
+  const rows: Array<[string, string]> = [
     ["Total Allocated Across Budgets", formatCurrency(summary.totalAllocated)],
     ["Total Expenses Across Budgets", formatCurrency(summary.totalExpenses)],
+  ];
+
+  /*
+   * A transfer is reported, but never as spending.
+   *
+   * Money moved from one allotment to another was not consumed, and the
+   * destination's allotment is not new money either — both figures above leave
+   * it out on purpose. It gets a line of its own so the report still accounts
+   * for every peso that left a budget.
+   */
+  if (summary.totalTransferred > 0) {
+    rows.push([
+      "Transferred Between Allotments",
+      formatCurrency(summary.totalTransferred),
+    ]);
+  }
+
+  rows.push(
     ["Budgets", String(summary.budgetCount)],
     ["Expense Count", String(summary.expenseCount)],
     ["Active Days", String(summary.activeDays)],
-  ];
+  );
+
+  return rows;
+}
+
+/**
+ * How a budget's funding is named in the report.
+ *
+ * A reader looking at ₱2,000 allotted to an Emergency Fund needs to know
+ * whether the user set that money aside or moved it out of another budget —
+ * otherwise the report's allocation figures look like they do not add up.
+ */
+export function allocationLabel(entry: {
+  allocationType: "direct" | "transferred";
+}): string {
+  return ALLOCATION_LABELS[entry.allocationType];
 }
 
 /**
@@ -298,6 +408,10 @@ export function buildHistoryReport(input: HistoryReportInput): jsPDF {
   // ---- Budget summary -----------------------------------------------------
   // Each allotment is its own pot, so the report accounts for them separately
   // before it lists any expense.
+  // The extra column only appears when money actually moved; a report with no
+  // transfers reads exactly as it did before.
+  const movedColumn = summary.budgets.some((entry) => entry.totalTransferred > 0);
+
   if (summary.budgets.length > 0) {
     y += 6;
     horizontalRule(doc, y, contentWidth);
@@ -317,18 +431,30 @@ export function buildHistoryReport(input: HistoryReportInput): jsPDF {
         right: PAGE_MARGIN,
         bottom: PAGE_MARGIN + FOOTER_HEIGHT,
       },
-      head: [["Budget", "Period", "Status", "Allocated", "Spent", "Remaining"]],
+      head: [movedColumn
+        ? ["Budget", "Period", "Status", "Allocated", "Spent", "Moved", "Remaining"]
+        : ["Budget", "Period", "Status", "Allocated", "Spent", "Remaining"]],
       // The period column is the budget's own applicability, not the span of
       // its activity: a general allotment says so rather than borrowing the
       // dates of whatever happened to be spent from it.
-      body: summary.budgets.map((entry) => [
-        entry.budgetName,
-        budgetPeriodLabel(entry),
-        budgetStatusLabel(entry),
-        formatCurrency(entry.budgetAmount),
-        formatCurrency(entry.totalExpenses),
-        formatCurrency(entry.remaining),
-      ]),
+      body: summary.budgets.map((entry) => {
+        const row = [
+          entry.budgetName,
+          budgetPeriodLabel(entry),
+          // A transferred allotment says so beneath its status, so its
+          // allocation is never read as a separate pot of money the user found
+          // somewhere. It rides in this column rather than on the name, which
+          // has the least room to spare.
+          entry.allocationType === "transferred"
+            ? `${budgetStatusLabel(entry)}\n${allocationLabel(entry)}`
+            : budgetStatusLabel(entry),
+          formatCurrency(entry.budgetAmount),
+          formatCurrency(entry.totalExpenses),
+        ];
+        if (movedColumn) row.push(formatCurrency(entry.totalTransferred));
+        row.push(formatCurrency(entry.remaining));
+        return row;
+      }),
       showHead: "everyPage",
       rowPageBreak: "avoid",
       theme: "plain",
@@ -348,14 +474,16 @@ export function buildHistoryReport(input: HistoryReportInput): jsPDF {
         lineWidth: { bottom: 0.75 },
         lineColor: RULE,
       },
-      columnStyles: {
-        0: { cellWidth: contentWidth - 404, fontStyle: "bold" },
-        1: { cellWidth: 120, textColor: MUTED, fontSize: 8.5 },
-        2: { cellWidth: 64, textColor: MUTED, fontSize: 8.5 },
-        3: { cellWidth: 72, halign: "right" },
-        4: { cellWidth: 72, halign: "right" },
-        5: { cellWidth: 76, halign: "right", fontStyle: "bold" },
-      },
+      /*
+       * Widths as fractions of the page, never as a fixed subtraction.
+       *
+       * Subtracting a constant from the content width is only right for the
+       * paper it was measured on: the same arithmetic that left a comfortable
+       * name column on Letter collapsed it to a few points on A4, shredding
+       * "Emergency Fund" down a column one letter wide. Fractions hold on any
+       * page size, and they always add to one.
+       */
+      columnStyles: columnWidths(contentWidth, movedColumn),
     });
 
     const summaryY = (doc as unknown as { lastAutoTable?: { finalY: number } })
@@ -414,9 +542,15 @@ export function buildHistoryReport(input: HistoryReportInput): jsPDF {
     doc.setFontSize(9);
     doc.setTextColor(MUTED);
     const countLabel =
-      group.expenseCount === 1 ? "1 expense" : `${group.expenseCount} expenses`;
+      group.expenseCount === 1
+        ? "1 transaction"
+        : `${group.expenseCount} transactions`;
     doc.text(
-      `${countLabel} · ${formatCurrency(group.total)}`,
+      group.transferred > 0
+        ? `${countLabel} · ${formatCurrency(group.total)} (incl. ${formatCurrency(
+            group.transferred,
+          )} transferred)`
+        : `${countLabel} · ${formatCurrency(group.total)}`,
       PAGE_MARGIN + contentWidth,
       y,
       { align: "right" },
@@ -453,17 +587,33 @@ export function buildHistoryReport(input: HistoryReportInput): jsPDF {
           right: PAGE_MARGIN,
           bottom: PAGE_MARGIN + FOOTER_HEIGHT,
         },
-        head: [["Expense", "Amount"]],
+        head: [["Transaction", "Amount"]],
+        // A transfer is named for what it is, so ₱2,000 moved into a new
+        // allotment can never be read as ₱2,000 spent on something.
         body: day.expenses.map((expense) => [
-          expense.name,
+          expense.kind === "transfer"
+            ? `${expense.name} — ${TRANSFER_ROW_LABEL}`
+            : expense.name,
           formatCurrency(expense.amount),
         ]),
-        foot: [
-          [
-            multipleBudgets ? `${day.budgetName} Total` : "Daily Total",
-            formatCurrency(day.totalExpenses),
-          ],
-        ],
+        // The foot reports the two apart. Only the first is spending; together
+        // they are what the day took out of this allotment.
+        foot:
+          day.totalTransferred > 0
+            ? [
+                ["Spent", formatCurrency(day.totalExpenses)],
+                ["Transferred", formatCurrency(day.totalTransferred)],
+                [
+                  multipleBudgets ? `${day.budgetName} Total` : "Daily Total",
+                  formatCurrency(day.totalExpenses + day.totalTransferred),
+                ],
+              ]
+            : [
+                [
+                  multipleBudgets ? `${day.budgetName} Total` : "Daily Total",
+                  formatCurrency(day.totalExpenses),
+                ],
+              ],
         // Repeat the column headers when a block spills onto a new page.
         showHead: "everyPage",
         showFoot: "lastPage",

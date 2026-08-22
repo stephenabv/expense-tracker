@@ -13,6 +13,7 @@ import { BudgetDetailModal } from "@/components/budgets/BudgetDetailModal";
 import { BudgetFormModal } from "@/components/budgets/BudgetFormModal";
 import { formatCurrency } from "@/lib/currency";
 import { sumAmounts } from "@/lib/calculations";
+import { budgetsFundedBy, isTransferred, totalAllotted } from "@/lib/budgets";
 
 function BudgetsSkeleton() {
   return (
@@ -32,12 +33,28 @@ function BudgetsSkeleton() {
 export function BudgetsView() {
   const {
     hydrated,
+    budgets,
     activeBudgetSummaries,
     completedBudgetSummaries,
     deleteBudget,
     isBudgetImmutable,
     getBudgetSummary,
   } = useTracker();
+
+  /** Names for the "Transferred from …" line on a destination card. */
+  const nameOf = (id: string | null) =>
+    id ? budgets.find((entry) => entry.id === id)?.name : undefined;
+
+  /*
+   * Whether deleting this allotment is even possible.
+   *
+   * A transfer has two sides. Deleting the destination would make the money
+   * deducted from the source vanish rather than come back; deleting the source
+   * would leave the destination funded by nothing. The server refuses both, so
+   * the card does not offer a control that could only ever fail.
+   */
+  const canDelete = (candidate: Budget) =>
+    !isTransferred(candidate) && budgetsFundedBy(budgets, candidate.id).length === 0;
   const { showToast } = useToast();
 
   const [formOpen, setFormOpen] = useState(false);
@@ -69,9 +86,15 @@ export function BudgetsView() {
    * drag "remaining" down with money that was never available — the number is
    * meant to answer "what can I still spend?", and a closed budget answers
    * nothing.
+   *
+   * Transferred allotments are left out of the *allotted* figure for a
+   * different reason: their pesos were already counted in the budget they came
+   * from, so adding them again would report more money than the user ever had.
+   * The remaining balances still add up normally — the source's fell by exactly
+   * what the destination's rose.
    */
-  const totalAllotted = sumAmounts(
-    activeBudgetSummaries.map((summary) => summary.budget.amount),
+  const allotted = totalAllotted(
+    activeBudgetSummaries.map((summary) => summary.budget),
   );
   const totalRemaining = sumAmounts(
     activeBudgetSummaries.map((summary) => summary.remaining),
@@ -97,7 +120,7 @@ export function BudgetsView() {
             </h2>
             {activeBudgetSummaries.length > 0 ? (
               <p className="mt-0.5 text-[0.8125rem] text-muted">
-                <span className="tabular">{formatCurrency(totalAllotted)}</span>{" "}
+                <span className="tabular">{formatCurrency(allotted)}</span>{" "}
                 allotted ·{" "}
                 <span className="tabular">{formatCurrency(totalRemaining)}</span>{" "}
                 remaining
@@ -172,7 +195,9 @@ export function BudgetsView() {
               <BudgetCard
                 key={summary.budget.id}
                 summary={summary}
+                sourceName={nameOf(summary.budget.sourceBudgetId)}
                 immutable={isBudgetImmutable(summary.budget)}
+                deletable={canDelete(summary.budget)}
                 onView={() => setViewing(summary.budget)}
                 onEdit={() => openEdit(summary.budget)}
                 onDelete={() => setPendingDelete(summary.budget)}
@@ -207,8 +232,8 @@ export function BudgetsView() {
               <p className="text-[0.8125rem] text-muted">
                 <span className="tabular">
                   {formatCurrency(
-                    sumAmounts(
-                      completedBudgetSummaries.map((s) => s.budget.amount),
+                    totalAllotted(
+                      completedBudgetSummaries.map((entry) => entry.budget),
                     ),
                   )}
                 </span>{" "}
@@ -230,6 +255,7 @@ export function BudgetsView() {
                 <BudgetCard
                   key={summary.budget.id}
                   summary={summary}
+                  sourceName={nameOf(summary.budget.sourceBudgetId)}
                   immutable
                   onView={() => setViewing(summary.budget)}
                 />

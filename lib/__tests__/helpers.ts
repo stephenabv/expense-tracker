@@ -30,6 +30,11 @@ export function budget(
     // Open unless a test says otherwise; `completedBudget` builds a closed one.
     status: "active",
     completedAt: null,
+    // Directly allotted unless a test says otherwise; `transferredBudget`
+    // builds one funded by moving money.
+    allocationType: "direct",
+    sourceBudgetId: null,
+    sourceTransactionId: null,
     ...overrides,
   };
 }
@@ -46,6 +51,25 @@ export function completedBudget(
   return budget(id, name, amount, startDate, endDate, {
     status: "fully_spent",
     completedAt: "2026-08-10T00:00:00.000Z",
+    ...overrides,
+  });
+}
+
+/** An allotment funded by moving money out of `sourceId`. */
+export function transferredBudget(
+  id: string,
+  name: string,
+  amount: number,
+  sourceId: string,
+  transactionId: string,
+  startDate: string | null = null,
+  endDate: string | null = startDate,
+  overrides: Partial<Budget> = {},
+): Budget {
+  return budget(id, name, amount, startDate, endDate, {
+    allocationType: "transferred",
+    sourceBudgetId: sourceId,
+    sourceTransactionId: transactionId,
     ...overrides,
   });
 }
@@ -74,7 +98,26 @@ export function expense(
     name,
     amount,
     expenseDate,
+    kind: "expense",
+    transferBudgetId: null,
     createdAt,
     updatedAt: createdAt,
+  };
+}
+
+/** A transfer transaction: money leaving `budgetId` for the allotment it made. */
+export function transfer(
+  id: string,
+  budgetId: string,
+  name: string,
+  amount: number,
+  expenseDate: string,
+  transferBudgetId: string,
+  createdAt = `${expenseDate}T08:00:00.000Z`,
+): Expense {
+  return {
+    ...expense(id, budgetId, name, amount, expenseDate, createdAt),
+    kind: "transfer",
+    transferBudgetId,
   };
 }

@@ -3,6 +3,7 @@ import { describe, expect, it } from "vitest";
 import {
   budgetPeriodLabel,
   budgetStatusLabel,
+  columnWidths,
   buildHistoryReport,
   groupDaysByDate,
   historyReportFilename,
@@ -333,6 +334,56 @@ describe("per-budget accounting in the report", () => {
     // Spending happened only on Aug 5, but the budget runs Aug 1–5.
     expect(week.firstDate).toBe("2026-08-05");
     expect(budgetPeriodLabel(week)).toBe("August 1, 2026 – August 5, 2026");
+  });
+});
+
+describe("budget summary column widths", () => {
+  // A4 in points, less the two margins — the page the report actually uses.
+  const A4 = 595.28 - 96;
+
+  for (const [label, withMoved] of [
+    ["without a transfer column", false],
+    ["with a transfer column", true],
+  ] as const) {
+    it(`fits the page ${label}`, () => {
+      const widths = Object.values(columnWidths(A4, withMoved)).map(
+        (style) => style.cellWidth,
+      );
+      const total = widths.reduce((sum, width) => sum + width, 0);
+
+      /*
+       * Exactly, not approximately.
+       *
+       * Every column is fixed, so autoTable has nothing to stretch: any
+       * remainder in either direction is reported as content it could not fit.
+       */
+      expect(total).toBeCloseTo(A4, 6);
+    });
+
+    it(`leaves every column usable ${label}`, () => {
+      const widths = Object.values(columnWidths(A4, withMoved)).map(
+        (style) => style.cellWidth,
+      );
+
+      /*
+       * The bug this guards against: widths were once a fixed subtraction from
+       * the content width, which was measured on Letter. On A4 the name column
+       * came out at 43pt and "Emergency Fund" wrapped down a column one letter
+       * wide. Nothing may fall below what a money figure needs.
+       */
+      for (const width of widths) expect(width).toBeGreaterThanOrEqual(50);
+      // The name column is the widest; it has the longest text to hold.
+      expect(widths[0]).toBe(Math.max(...widths));
+    });
+  }
+
+  it("scales with the page rather than assuming one size", () => {
+    const narrow = Object.values(columnWidths(400, true)).map((s) => s.cellWidth);
+    const wide = Object.values(columnWidths(800, true)).map((s) => s.cellWidth);
+
+    expect(narrow.reduce((a, b) => a + b, 0)).toBeCloseTo(400, 6);
+    expect(wide.reduce((a, b) => a + b, 0)).toBeCloseTo(800, 6);
+    expect(wide[0]).toBeGreaterThan(narrow[0]);
   });
 });
 
