@@ -695,3 +695,116 @@ describe("a merged allotment through the actions", () => {
     expect(write.expense.budgetId).toBe(combined.id);
   });
 });
+
+/* ------------------------------------------------- spending the last peso */
+
+describe("spending a budget's exact remaining balance", () => {
+  /*
+   * Reported from production: a ₱57.79 balance refusing a ₱57.79 expense, with
+   * the error quoting back the same ₱57.79 the user had typed.
+   *
+   * The balance came from `amount - SUM(expenses)` in floats — ₱5,000 less
+   * ₱10.10, ₱3.30 and ₱4,928.81 is 57.789999999999964 — so the amount looked
+   * larger than what was left. The screen rounded before comparing and let the
+   * button through; the server did not, and refused.
+   */
+  async function drainedTo5779() {
+    await signIn();
+    const budget = unwrap(
+      await createBudgetAction({ name: "Pag-Ibig MPL", amount: 5_000, ...GENERAL }),
+    );
+
+    for (const [name, amount] of [
+      ["Fee", 10.1],
+      ["Charge", 3.3],
+      ["Loan payment", 4_928.81],
+    ] as const) {
+      unwrap(
+        await createExpenseAction({
+          budgetId: budget.id,
+          name,
+          amount,
+          expenseDate: "2026-08-23",
+        }),
+      );
+    }
+
+    return budget;
+  }
+
+  it("accepts the whole remaining balance", async () => {
+    const budget = await drainedTo5779();
+
+    const write = unwrap(
+      await createExpenseAction({
+        budgetId: budget.id,
+        name: "UB CC Payment",
+        amount: 57.79,
+        expenseDate: "2026-08-23",
+      }),
+    );
+
+    expect(write.expense.amount).toBe(57.79);
+  });
+
+  it("closes the budget, because that is exactly ₱0.00 left", async () => {
+    const budget = await drainedTo5779();
+
+    const write = unwrap(
+      await createExpenseAction({
+        budgetId: budget.id,
+        name: "UB CC Payment",
+        amount: 57.79,
+        expenseDate: "2026-08-23",
+      }),
+    );
+
+    // The drift was also hiding the completion: a budget that can never be
+    // spent to its last centavo can never become Fully Spent either.
+    expect(write.budget.status).toBe("fully_spent");
+  });
+
+  it("still refuses one centavo more than is left", async () => {
+    const budget = await drainedTo5779();
+
+    const refused = await createExpenseAction({
+      budgetId: budget.id,
+      name: "Too much",
+      amount: 57.8,
+      expenseDate: "2026-08-23",
+    });
+
+    expect(errorOf(refused)).toMatch(/exceeds this budget's available balance/i);
+  });
+
+  it("lets a transfer move the whole remaining balance too", async () => {
+    const budget = await drainedTo5779();
+
+    const write = unwrap(
+      await createTransferAction({
+        sourceBudgetId: budget.id,
+        amount: 57.79,
+        expenseDate: "2026-08-23",
+        name: "Leftovers",
+        ...GENERAL,
+      }),
+    );
+
+    expect(write.destination.amount).toBe(57.79);
+    expect(write.source.status).toBe("fully_spent");
+  });
+
+  it("reports the balance as the screen shows it", async () => {
+    const budget = await drainedTo5779();
+
+    const refused = await createExpenseAction({
+      budgetId: budget.id,
+      name: "Too much",
+      amount: 100,
+      expenseDate: "2026-08-23",
+    });
+
+    // Not "₱57.789999999999964", and not a figure the user cannot act on.
+    expect(errorOf(refused)).toContain("₱57.79");
+  });
+});

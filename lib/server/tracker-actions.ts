@@ -54,6 +54,7 @@ import {
   FULLY_SPENT_LABEL,
   budgetApplicability,
   budgetsForDate,
+  expensesForBudget,
   expensesOutsidePeriod,
   isClosed,
   isFullySpent,
@@ -62,6 +63,7 @@ import {
   isTransferred,
 } from "@/lib/budgets";
 import { formatCurrency } from "@/lib/currency";
+import { calculateAvailableBalance } from "@/lib/calculations";
 import { isDatabaseConfigured } from "@/lib/db/client";
 
 export type ActionResult<T> =
@@ -425,15 +427,22 @@ async function validateExpenseAgainstServer(
   const eligible = budgetsForDate(budgets, input.expenseDate);
 
   const budget = eligible.find((entry) => entry.id === input.budgetId);
-  const own = budget
-    ? expenses.filter(
-        (expense) =>
-          expense.budgetId === budget.id && expense.id !== excludeExpenseId,
-      )
-    : [];
 
+  /*
+   * The shared helper, not arithmetic written out again here.
+   *
+   * It accumulates in whole centavos and rounds once, which is the difference
+   * between ₱57.79 and 57.789999999999964 — and this path once hand-rolled the
+   * subtraction, so the server disagreed with the screen about the last centavo
+   * of a budget. It also handles excluding the expense being edited, which is
+   * the other thing that was being repeated.
+   */
   const availableBalance = budget
-    ? budget.amount - own.reduce((sum, expense) => sum + expense.amount, 0)
+    ? calculateAvailableBalance(
+        budget.amount,
+        expensesForBudget(expenses, budget.id),
+        excludeExpenseId,
+      )
     : undefined;
 
   const result = validateExpenseForm(
@@ -686,10 +695,7 @@ export async function createTransferAction(
   const source = eligible.find((entry) => entry.id === input.sourceBudgetId);
 
   const availableBalance = source
-    ? source.amount -
-      expenses
-        .filter((expense) => expense.budgetId === source.id)
-        .reduce((sum, expense) => sum + expense.amount, 0)
+    ? calculateAvailableBalance(source.amount, expensesForBudget(expenses, source.id))
     : undefined;
 
   const result = validateTransferForm(
