@@ -7,7 +7,7 @@
 
 import type { Budget, BudgetApplicability } from "@/types/budget";
 import type { Expense } from "@/types/expense";
-import { MAX_AMOUNT, formatCurrency, parseAmount } from "@/lib/currency";
+import { MAX_AMOUNT, formatCurrency, parseAmount, roundCurrency } from "@/lib/currency";
 import { isValidDateKey, type DateKey } from "@/lib/dates";
 
 export const MAX_NAME_LENGTH = 60;
@@ -359,11 +359,22 @@ export function validateExpenseAmount(
     return { ok: false, error: `Amount cannot exceed ${formatCurrency(MAX_AMOUNT)}.` };
   }
 
+  /*
+   * Compared in whole centavos, never as floats.
+   *
+   * A balance arrives here as `amount - SUM(expenses)`, which can land a hair
+   * below the figure it prints as — ₱5,000 less ₱10.10, ₱3.30 and ₱4,928.81 is
+   * 57.789999999999964. Comparing ₱57.79 against that made a user's own
+   * remaining balance look like an overdraft, and the error quoted back the
+   * exact number they had typed. Rounding both sides to centavos first asks the
+   * question the user is actually asking: is this more money than is left?
+   */
   if (
     !allowOverdraft &&
     typeof availableBalance === "number" &&
     Number.isFinite(availableBalance) &&
-    value > availableBalance
+    Math.round(roundCurrency(value) * 100) >
+      Math.round(roundCurrency(availableBalance) * 100)
   ) {
     return {
       ok: false,

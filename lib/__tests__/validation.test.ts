@@ -10,7 +10,7 @@ import {
   validateExpenseForm,
   validateExpenseName,
 } from "@/lib/validation";
-import { MAX_AMOUNT } from "@/lib/currency";
+import { MAX_AMOUNT, formatCurrency } from "@/lib/currency";
 import { budget, generalBudget } from "./helpers";
 
 const week1 = budget("b1", "August Week 1", 5_000, "2026-08-01", "2026-08-05");
@@ -309,5 +309,45 @@ describe("validateExpenseForm", () => {
         availableBalance: 200,
       }).ok,
     ).toBe(false);
+  });
+});
+
+describe("spending the last of a budget", () => {
+  /*
+   * The bug this guards against refused a user's own remaining balance.
+   *
+   * `amount - SUM(expenses)` in floats can land a hair below the figure it
+   * prints as: ₱5,000 less ₱10.10, ₱3.30 and ₱4,928.81 is 57.789999999999964,
+   * which formats as ₱57.79. Comparing the entered ₱57.79 against *that* made
+   * the amount look larger than the balance, and the form said "That exceeds
+   * this budget's available balance of ₱57.79" — quoting the very number the
+   * user had typed.
+   */
+  const drifted = 5_000 - (10.1 + 3.3 + 4_928.81);
+
+  it("reproduces the drift the balance is computed from", () => {
+    expect(drifted).not.toBe(57.79);
+    expect(formatCurrency(drifted)).toBe("₱57.79");
+  });
+
+  it("accepts an amount equal to the balance, drift and all", () => {
+    expect(validateExpenseAmount("57.79", { availableBalance: drifted }).ok).toBe(true);
+  });
+
+  it("accepts an amount equal to an exact balance", () => {
+    expect(validateExpenseAmount("57.79", { availableBalance: 57.79 }).ok).toBe(true);
+  });
+
+  it("still refuses a single centavo more", () => {
+    const result = validateExpenseAmount("57.80", { availableBalance: drifted });
+    expect(result.ok).toBe(false);
+    expect(result.error).toMatch(/exceeds this budget's available balance of ₱57\.79/);
+  });
+
+  it("compares in whole centavos rather than by float", () => {
+    // 0.1 + 0.2 is famously 0.30000000000000004; spending ₱0.30 of it is still
+    // spending exactly what is there.
+    expect(validateExpenseAmount("0.30", { availableBalance: 0.1 + 0.2 }).ok).toBe(true);
+    expect(validateExpenseAmount("0.31", { availableBalance: 0.1 + 0.2 }).ok).toBe(false);
   });
 });
