@@ -1,5 +1,6 @@
 "use client";
 
+import Link from "next/link";
 import { useState } from "react";
 
 import type { Budget } from "@/types/budget";
@@ -97,6 +98,7 @@ export function Dashboard() {
   }
 
   const availableIds = new Set(todaysBudgets.map((budget) => budget.id));
+  const completedCount = completedBudgetSummaries.length;
 
   return (
     <>
@@ -110,18 +112,29 @@ export function Dashboard() {
           />
 
           {/*
-           * Closed allotments are shown separately and never counted as funds.
-           * Mixing them into the list above would put ₱0.00 rows among the
-           * money that is actually available to spend.
+           * Closed allotments are not listed here, only pointed at.
+           *
+           * This screen answers one question — what can I spend right now —
+           * and a ₱0.00 row answers it with a no. The full record lives on the
+           * budgets screen, which already lists completed and merged
+           * allotments with their totals; this line is the way back to it, so
+           * they are out of the way without being hidden.
            */}
-          <BudgetOverview
-            summaries={completedBudgetSummaries}
-            title="Completed Budgets"
-            headingId="completed-budgets-heading"
-            description="Fully spent and locked — kept as a record."
-            hideManageLink
-            onSelect={setViewing}
-          />
+          {completedCount > 0 ? (
+            <p className="px-1 text-[0.8125rem] text-muted">
+              {completedCount === 1
+                ? "1 completed allotment is"
+                : `${completedCount} completed allotments are`}{" "}
+              kept on the{" "}
+              <Link
+                href="/budgets"
+                className="rounded font-medium text-foreground underline underline-offset-4 focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-ring"
+              >
+                budgets screen
+              </Link>
+              .
+            </p>
+          ) : null}
 
           <ExpenseList
             onAddExpense={() => setAddExpenseOpen(true)}
