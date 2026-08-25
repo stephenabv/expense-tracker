@@ -14,14 +14,6 @@ export interface BudgetOverviewProps {
   availableIds?: Set<string>;
   /** Opens one allotment's detail. */
   onSelect?: (budget: Budget) => void;
-  /** Section heading. Defaults to the open-allotments list. */
-  title?: string;
-  /** Unique id for the heading, so two lists can sit on one page. */
-  headingId?: string;
-  /** One line under the heading, e.g. what makes this list different. */
-  description?: string;
-  /** Hides the link to the budgets screen. */
-  hideManageLink?: boolean;
 }
 
 /**
@@ -35,38 +27,29 @@ export function BudgetOverview({
   summaries,
   availableIds,
   onSelect,
-  title = "Your Budgets",
-  headingId = "your-budgets-heading",
-  description,
-  hideManageLink = false,
 }: BudgetOverviewProps) {
   if (summaries.length === 0) return null;
 
   return (
     <section
-      aria-labelledby={headingId}
+      aria-labelledby="your-budgets-heading"
       className="overflow-hidden rounded-2xl border border-border-subtle bg-surface shadow-card"
     >
       <div className="flex items-center justify-between gap-3 border-b border-border-subtle px-4 py-3.5 sm:px-5">
         <div className="min-w-0">
           <h2
-            id={headingId}
+            id="your-budgets-heading"
             className="text-[0.9375rem] font-semibold tracking-tight text-foreground"
           >
-            {title}
+            Your Budgets
           </h2>
-          {description ? (
-            <p className="mt-0.5 text-[0.8125rem] text-muted">{description}</p>
-          ) : null}
         </div>
-        {hideManageLink ? null : (
-          <Link
-            href="/budgets"
-            className="shrink-0 rounded-lg text-[0.8125rem] font-medium text-muted underline-offset-4 hover:text-foreground hover:underline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-ring"
-          >
-            Manage
-          </Link>
-        )}
+        <Link
+          href="/budgets"
+          className="shrink-0 rounded-lg text-[0.8125rem] font-medium text-muted underline-offset-4 hover:text-foreground hover:underline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-ring"
+        >
+          Manage
+        </Link>
       </div>
 
       <ul className="divide-y divide-border-subtle">
