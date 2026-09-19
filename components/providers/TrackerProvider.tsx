@@ -37,6 +37,7 @@ import type {
 } from "@/types/budget";
 import type { Expense, ExpenseInput } from "@/types/expense";
 import {
+  availableBalance,
   budgetsForDate,
   budgetsForToday,
   isClosed,
@@ -47,7 +48,6 @@ import {
   summarizeBudgetsFromTotals,
   type BudgetTotals,
 } from "@/lib/budgets";
-import { roundCurrency } from "@/lib/currency";
 import {
   DEFAULT_PAGE_SIZE,
   paginationFor,
@@ -486,19 +486,15 @@ export function TrackerProvider({
     [budgets],
   );
 
+  // Read from the same summary the cards show, so the form cannot offer a
+  // balance the dashboard disagrees with; `availableBalance` owns the rule.
   const availableBalanceFor = useCallback(
-    (budgetId: string, excluding?: Expense | null) => {
-      const budget = budgets.find((entry) => entry.id === budgetId);
-      if (!budget) return 0;
-
-      const spent = totals.find((entry) => entry.budgetId === budgetId)?.totalExpenses ?? 0;
-      // An expense being edited is already inside `spent`; leaving it there
-      // would measure the new amount against a balance it has already reduced.
-      const credit = excluding?.budgetId === budgetId ? excluding.amount : 0;
-
-      return roundCurrency(budget.amount - spent + credit);
-    },
-    [budgets, totals],
+    (budgetId: string, excluding?: Expense | null) =>
+      availableBalance(
+        budgetSummaries.find((entry) => entry.budget.id === budgetId),
+        excluding,
+      ),
+    [budgetSummaries],
   );
 
   const activeBudgetSummaries = useMemo(

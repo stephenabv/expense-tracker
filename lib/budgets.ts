@@ -439,6 +439,31 @@ export function summarizeBudgetsFromTotals(
 }
 
 /**
+ * What a budget can still fund, as a form should offer it.
+ *
+ * `summary.remaining` is already `amount − (spending + transfers out)`, and
+ * that is the whole point of reading it here rather than re-deriving: an
+ * earlier version of the expense form subtracted spending alone, so a budget
+ * that had funded another allotment offered money it no longer held and the
+ * server refused the write the form had just promised.
+ *
+ * `excluding` is the expense being edited. Its amount is already deducted, so
+ * it is credited back — otherwise the new amount would be measured against a
+ * balance it has itself reduced.
+ */
+export function availableBalance(
+  summary: BudgetSummary | null | undefined,
+  excluding?: Pick<Expense, "budgetId" | "amount"> | null,
+): number {
+  if (!summary) return 0;
+
+  const credit =
+    excluding?.budgetId === summary.budget.id ? excluding.amount : 0;
+
+  return roundCurrency(summary.remaining + credit);
+}
+
+/**
  * Listing order: dated allotments newest period first, then the general ones.
  *
  * General budgets have no period to sort by, so they are ordered by creation

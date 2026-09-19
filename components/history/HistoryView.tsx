@@ -98,7 +98,9 @@ export function HistoryView() {
   const { budgets } = useTracker();
   const [filter, setFilter] = useState<HistoryFilter>({ mode: "all" });
   const [expenses, setExpenses] = useState<Expense[]>([]);
-  const [spentBefore, setSpentBefore] = useState<Map<string, number>>(new Map());
+  const [chargedBefore, setChargedBefore] = useState<Map<string, number>>(
+    new Map(),
+  );
   const [merges, setMerges] = useState<BudgetMerge[]>([]);
   const [loading, setLoading] = useState(true);
   const [page, setPage] = useState(1);
@@ -121,7 +123,7 @@ export function HistoryView() {
 
       if (result.ok) {
         setExpenses(result.data.expenses);
-        setSpentBefore(new Map(result.data.spentBefore));
+        setChargedBefore(new Map(result.data.chargedBefore));
         setMerges(result.data.merges);
       }
     } finally {
@@ -137,8 +139,8 @@ export function HistoryView() {
   }, [load]);
 
   const history = useMemo(
-    () => buildHistory(budgets, expenses, spentBefore),
-    [budgets, expenses, spentBefore],
+    () => buildHistory(budgets, expenses, chargedBefore),
+    [budgets, expenses, chargedBefore],
   );
 
   const days = useMemo(() => filterHistory(history, filter), [history, filter]);

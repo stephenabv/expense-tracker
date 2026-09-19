@@ -10,6 +10,7 @@
 import { afterAll, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
 
 import { createTestDatabase, type TestDatabase } from "./support/db";
+import { buildHistory } from "@/lib/history";
 
 /** The session is the only source of identity; the tests choose who is calling. */
 let callerId: string | null = null;
@@ -29,6 +30,7 @@ const {
   deleteBudgetAction,
   deleteExpenseAction,
   listBudgetsAction,
+  loadHistoryAction,
   mergeBudgetsAction,
   setBudgetLockedAction,
   updateBudgetAction,
@@ -806,5 +808,77 @@ describe("spending a budget's exact remaining balance", () => {
 
     // Not "₱57.789999999999964", and not a figure the user cannot act on.
     expect(errorOf(refused)).toContain("₱57.79");
+  });
+});
+
+/* ----------------------------------------------- history's opening balance */
+
+/**
+ * History fetches a window, so each budget's running balance opens from what
+ * had already left it. That figure once counted spending only: a budget that
+ * had transferred money out before the window opened above the balance the
+ * tracker showed, and every day in the window inherited the gap.
+ */
+describe("what history says left a budget before the window", () => {
+  it("counts transfers out, not spending alone", async () => {
+    const main = await withBudget(10_000);
+
+    unwrap(
+      await createExpenseAction({
+        budgetId: main.id,
+        name: "Groceries",
+        amount: 500,
+        expenseDate: "2026-08-01",
+      }),
+    );
+
+    unwrap(
+      await createTransferAction({
+        sourceBudgetId: main.id,
+        amount: 2_000,
+        expenseDate: "2026-08-02",
+        name: "Emergency Fund",
+        ...GENERAL,
+      }),
+    );
+
+    // A window that starts after both, so both are "before".
+    const history = unwrap(await loadHistoryAction({ from: "2026-09-01" }));
+    const charged = new Map(history.chargedBefore);
+
+    expect(charged.get(main.id)).toBe(2_500);
+  });
+
+  it("opens the window at the balance the tracker shows", async () => {
+    const main = await withBudget(10_000);
+
+    unwrap(
+      await createTransferAction({
+        sourceBudgetId: main.id,
+        amount: 2_000,
+        expenseDate: "2026-08-02",
+        name: "Emergency Fund",
+        ...GENERAL,
+      }),
+    );
+
+    unwrap(
+      await createExpenseAction({
+        budgetId: main.id,
+        name: "Rent",
+        amount: 1_000,
+        expenseDate: "2026-09-05",
+      }),
+    );
+
+    const history = unwrap(await loadHistoryAction({ from: "2026-09-01" }));
+    const [day] = buildHistory(
+      [unwrap(await listBudgetsAction()).find((entry) => entry.id === main.id)!],
+      history.expenses,
+      new Map(history.chargedBefore),
+    );
+
+    expect(day.startingBalance).toBe(8_000);
+    expect(day.endingBalance).toBe(7_000);
   });
 });
