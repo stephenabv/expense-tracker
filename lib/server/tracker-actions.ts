@@ -63,7 +63,7 @@ import {
   isTransferred,
 } from "@/lib/budgets";
 import { formatCurrency } from "@/lib/currency";
-import { calculateAvailableBalance } from "@/lib/calculations";
+import { calculateAvailableBalance, sumAmounts } from "@/lib/calculations";
 import { isDatabaseConfigured } from "@/lib/db/client";
 
 export type ActionResult<T> =
@@ -203,7 +203,7 @@ export async function loadHistoryAction(
 ): Promise<
   ActionResult<{
     expenses: Expense[];
-    spentBefore: Array<[string, number]>;
+    chargedBefore: Array<[string, number]>;
     merges: BudgetMerge[];
   }>
 > {
@@ -225,7 +225,16 @@ export async function loadHistoryAction(
     ok: true,
     data: {
       expenses,
-      spentBefore: before.map((entry) => [entry.budgetId, entry.totalExpenses]),
+      /*
+       * Both kinds, summed. The opening balance has to account for every
+       * centavo that left the budget before the window — a transfer out is not
+       * spending, but it is gone, and counting only `totalExpenses` opened the
+       * window above the balance the tracker showed.
+       */
+      chargedBefore: before.map((entry) => [
+        entry.budgetId,
+        sumAmounts([entry.totalExpenses, entry.totalTransferred]),
+      ]),
       merges,
     },
   };

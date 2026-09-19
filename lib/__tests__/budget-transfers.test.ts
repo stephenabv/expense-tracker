@@ -27,6 +27,7 @@ import {
   updateExpenseRow,
 } from "@/lib/db/tracker";
 import {
+  availableBalance,
   budgetsForDate,
   budgetsFundedBy,
   isTransferred,
@@ -552,6 +553,53 @@ describe("the source relationship", () => {
     const destination = budgets.find((entry) => entry.id === fund.id)!;
     // The link is by id, so a label change cannot break it.
     expect(sourceBudgetOf(budgets, destination)?.name).toBe("Renamed Source");
+  });
+});
+
+/* --------------------------------------------- what a form may still offer */
+
+/**
+ * The expense form asks `availableBalance` what a budget can still fund, and
+ * the tracker cards read `remaining` from the same summary. They once
+ * disagreed: the form subtracted spending only, so a budget that had funded
+ * another allotment appeared to hold the transferred money as well — ₱1,530
+ * more in the dropdown than on the card behind it, and the server refused the
+ * write the form had just offered.
+ */
+describe("the balance offered for a new expense", () => {
+  const main = makeBudget("b1", "Main Budget", 13_000, null);
+  const totals = [
+    {
+      budgetId: "b1",
+      totalExpenses: 800,
+      totalTransferred: 2_000,
+      expenseCount: 2,
+      transferCount: 1,
+    },
+  ];
+  const [summary] = summarizeBudgetsFromTotals([main], totals);
+
+  it("matches the balance the tracker shows", () => {
+    expect(summary.remaining).toBe(10_200);
+    expect(availableBalance(summary)).toBe(10_200);
+  });
+
+  it("does not offer money that has been transferred out", () => {
+    // 13,000 - 800 spent, ignoring the transfer, would be 12,200.
+    expect(availableBalance(summary)).not.toBe(12_200);
+  });
+
+  it("credits back the expense being edited, and only that one", () => {
+    const edited = expense("e1", "b1", "Groceries", 500, "2026-08-22");
+    expect(availableBalance(summary, edited)).toBe(10_700);
+
+    const otherBudgets = expense("e9", "b2", "Coffee", 500, "2026-08-22");
+    expect(availableBalance(summary, otherBudgets)).toBe(10_200);
+  });
+
+  it("offers nothing for a budget it has no summary for", () => {
+    expect(availableBalance(undefined)).toBe(0);
+    expect(availableBalance(null)).toBe(0);
   });
 });
 

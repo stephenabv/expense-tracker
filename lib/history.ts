@@ -151,13 +151,14 @@ export function buildHistory(
   budgets: Budget[],
   expenses: Expense[],
   /**
-   * Spend that happened before the supplied expenses, per budget id.
+   * Everything charged before the supplied expenses, per budget id.
    *
    * Supplied when only a window of history was fetched: without it a budget
-   * would open the window at its full allotment, as though nothing had been
-   * spent from it earlier.
+   * would open the window at its full allotment, as though nothing had left it
+   * earlier. Transfers count here for the same reason they count inside the
+   * window — the money is gone either way — so this is not the spend total.
    */
-  spentBefore?: Map<string, number>,
+  chargedBefore?: Map<string, number>,
 ): HistoryDay[] {
   const days: HistoryDay[] = [];
 
@@ -168,7 +169,7 @@ export function buildHistory(
     const groups = groupExpensesByDate(own);
     const dates = [...groups.keys()].sort();
 
-    let running = roundCurrency(budget.amount - (spentBefore?.get(budget.id) ?? 0));
+    let running = roundCurrency(budget.amount - (chargedBefore?.get(budget.id) ?? 0));
 
     for (const date of dates) {
       const dayExpenses = groups.get(date) ?? [];

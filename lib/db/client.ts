@@ -97,6 +97,58 @@ export class DatabaseNotConfiguredError extends Error {
   }
 }
 
+/**
+ * Thrown when the database could not be reached at all.
+ *
+ * A refused, dropped or timed-out socket, a host that does not resolve, or a
+ * connection pooler that turned the credentials away before any session
+ * existed — Supabase's pooler answers an unknown project ref with "tenant not
+ * found", which is this, not a rejected statement.
+ *
+ * Kept distinct from an error the database raised about a statement it
+ * understood: nothing ran, so the failure says nothing about the data, and a
+ * caller must not report it as a domain outcome. Callers ask with
+ * `isDatabaseUnavailableError` rather than matching on driver messages.
+ */
+export class DatabaseUnavailableError extends Error {
+  constructor(cause: unknown) {
+    super("The database could not be reached.", { cause });
+    this.name = "DatabaseUnavailableError";
+  }
+}
+
+/**
+ * True when `error`, or anything it wraps, is a `DatabaseUnavailableError`.
+ *
+ * Framework boundaries re-wrap whatever they catch — Auth.js turns a provider
+ * failure into `CallbackRouteError` carrying the original under `cause.err` —
+ * so the question has to be asked of the whole chain. Identity is matched by
+ * name as well as by prototype: the bundler can emit this module into several
+ * server chunks, and an `instanceof` across two copies is false.
+ */
+export function isDatabaseUnavailableError(error: unknown): boolean {
+  const seen = new Set<unknown>();
+  let current: unknown = error;
+
+  while (current && typeof current === "object" && !seen.has(current)) {
+    seen.add(current);
+
+    if (
+      current instanceof DatabaseUnavailableError ||
+      (current as Error).name === "DatabaseUnavailableError"
+    ) {
+      return true;
+    }
+
+    // Auth.js nests the provider's error one level deeper than `cause` alone.
+    const cause = (current as { cause?: unknown }).cause;
+    const nested = (cause as { err?: unknown } | undefined)?.err;
+    current = nested ?? cause;
+  }
+
+  return false;
+}
+
 export function isDatabaseConfigured(): boolean {
   return Boolean(cache.override) || Boolean(process.env.DATABASE_URL);
 }
@@ -210,7 +262,7 @@ export function getDatabase(): SqlExecutor {
      * inside an aborted transaction would be worse than failing.
      */
     transaction: async <T,>(fn: (tx: SqlExecutor) => Promise<T>) => {
-      const client = await created.connect();
+      const client = await checkOut(created);
       const tx: SqlExecutor = {
         query: async <R,>(text: string, params?: unknown[]) => {
           const result = await client.query(text, params as never[]);
@@ -246,8 +298,7 @@ export function getDatabase(): SqlExecutor {
 
       for (let attempt = 0; attempt < 3; attempt += 1) {
         try {
-          const result = await created.query(text, params as never[]);
-          return { rows: result.rows as T[] };
+          return await queryOnce<T>(created, text, params);
         } catch (error) {
           if (!isTransientConnectionError(error)) throw error;
           lastError = error;
@@ -255,7 +306,11 @@ export function getDatabase(): SqlExecutor {
         }
       }
 
-      throw lastError;
+      // Every attempt lost its connection, so the server is unreachable as far
+      // as the caller is concerned.
+      throw lastError instanceof DatabaseUnavailableError
+        ? lastError
+        : new DatabaseUnavailableError(lastError);
     },
   };
 
@@ -263,11 +318,56 @@ export function getDatabase(): SqlExecutor {
 }
 
 /**
+ * Checks a connection out of the pool.
+ *
+ * Nothing has been sent yet, so every failure here is an availability failure —
+ * an unresolvable host, a refused or timed-out socket, a pooler that rejected
+ * the credentials before opening a session — and none of them say anything
+ * about the statement that was about to run. Naming that difference here is
+ * what lets call sites stop reporting an outage as a domain answer.
+ */
+async function checkOut(
+  pool: import("pg").Pool,
+): Promise<import("pg").PoolClient> {
+  try {
+    return await pool.connect();
+  } catch (error) {
+    throw new DatabaseUnavailableError(error);
+  }
+}
+
+/** One statement on one pooled connection, released whichever way it ends. */
+async function queryOnce<T>(
+  pool: import("pg").Pool,
+  text: string,
+  params?: unknown[],
+): Promise<SqlResult<T>> {
+  const client = await checkOut(pool);
+  let broken: Error | undefined;
+
+  try {
+    const result = await client.query(text, params as never[]);
+    return { rows: result.rows as T[] };
+  } catch (error) {
+    // Releasing with an error discards the socket instead of handing a broken
+    // connection to the next caller.
+    if (isTransientConnectionError(error)) broken = error as Error;
+    throw error;
+  } finally {
+    client.release(broken);
+  }
+}
+
+/**
  * True for a dropped or refused connection, as opposed to a statement the
  * database understood and rejected.
  */
 function isTransientConnectionError(error: unknown): boolean {
-  const candidate = error as { code?: string; message?: string };
+  // A connection that never opened arrives wrapped; the driver's own error,
+  // which says whether another attempt is worth making, is underneath.
+  const candidate = (
+    error instanceof DatabaseUnavailableError ? error.cause : error
+  ) as { code?: string; message?: string };
   // A SQLSTATE code means Postgres processed the statement and said no.
   if (candidate?.code && /^[0-9A-Z]{5}$/.test(candidate.code)) return false;
 
