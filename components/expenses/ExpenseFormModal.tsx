@@ -11,6 +11,7 @@ import { Modal } from "@/components/ui/Modal";
 import { TextField } from "@/components/ui/TextField";
 import { DateField } from "@/components/ui/DateField";
 import { SelectField } from "@/components/ui/SelectField";
+import { InfoTooltip } from "@/components/ui/InfoTooltip";
 import { ApplicabilityField } from "@/components/budgets/ApplicabilityField";
 import {
   CURRENCY_SYMBOL,
@@ -32,6 +33,9 @@ import {
 } from "@/lib/validation";
 
 const FORM_ID = "expense-form";
+
+/** Short enough to sit on one line next to its checkbox on a phone. */
+const TRANSFER_TOGGLE_LABEL = "Create as budget";
 
 export interface ExpenseFormModalProps {
   open: boolean;
@@ -411,28 +415,35 @@ export function ExpenseFormModal({
         />
 
         {/* Offered only when adding: an expense already recorded cannot become a
-            transfer without inventing an allotment for money already spent. */}
+            transfer without inventing an allotment for money already spent.
+
+            The label says the short version and the rest lives in the tooltip:
+            the sentence explaining it was three lines on a phone, above the
+            fields this form actually exists to fill in. The info button sits
+            outside the label so tapping it opens the explanation rather than
+            ticking the box. */}
         {!isEditing && !noBudget ? (
-          <label className="flex cursor-pointer items-start gap-3 rounded-xl border border-border-subtle bg-surface-muted p-3.5">
-            <input
-              type="checkbox"
-              checked={asTransfer}
-              onChange={(event) => {
-                setAsTransfer(event.target.checked);
-                setErrors({});
-              }}
-              className="mt-0.5 h-4 w-4 shrink-0 accent-foreground focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-ring"
-            />
-            <span className="min-w-0">
-              <span className="block text-sm font-medium text-foreground">
-                Create this expense as a new budget allotment
+          <div className="flex items-center gap-2 rounded-xl border border-border-subtle bg-surface-muted p-3.5">
+            <label className="flex min-w-0 flex-1 cursor-pointer items-center gap-3">
+              <input
+                type="checkbox"
+                checked={asTransfer}
+                onChange={(event) => {
+                  setAsTransfer(event.target.checked);
+                  setErrors({});
+                }}
+                className="h-4 w-4 shrink-0 accent-foreground focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-ring"
+              />
+              <span className="min-w-0 text-sm font-medium text-foreground">
+                {TRANSFER_TOGGLE_LABEL}
               </span>
-              <span className="mt-0.5 block text-[0.8125rem] text-muted">
-                Moves the money into a new allotment instead of spending it. Your
-                total funds do not change — only which pot holds them.
-              </span>
-            </span>
-          </label>
+            </label>
+
+            <InfoTooltip label={TRANSFER_TOGGLE_LABEL}>
+              Moves the money into a new allotment instead of spending it. Your
+              total funds do not change — only which pot holds them.
+            </InfoTooltip>
+          </div>
         ) : null}
 
         {noBudget ? (
