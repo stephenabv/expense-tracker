@@ -29,7 +29,7 @@ import {
 import { consume, rateLimitMessage } from "@/lib/server/rate-limit";
 import { clientIp } from "@/lib/server/request";
 import { DEFAULT_AUTHENTICATED_ROUTE } from "@/lib/auth/routes";
-import { isDatabaseConfigured } from "@/lib/db/client";
+import { isDatabaseConfigured, isDatabaseUnavailableError } from "@/lib/db/client";
 
 export interface ActionState {
   ok?: boolean;
@@ -46,6 +46,39 @@ const SETUP_REQUIRED: ActionState = {
   message:
     "The server is not connected to a database yet. Set DATABASE_URL to continue.",
 };
+
+/**
+ * Shown when the database is configured but unreachable.
+ *
+ * Distinct from `SETUP_REQUIRED`, which means nothing was configured at all.
+ * Saying so reveals nothing: the answer is the same for an address that exists
+ * and one that does not, and the alternative — folding an outage into "invalid
+ * email or password" — tells people to change a password that was never wrong.
+ */
+const SERVICE_UNAVAILABLE: ActionState = {
+  ok: false,
+  message:
+    "We can't reach the service at the moment. Please try again in a few minutes.",
+};
+
+/**
+ * Runs the part of an action that touches the database.
+ *
+ * Anything else is rethrown: only an unreachable database has a safe, useful
+ * message, and swallowing the rest would hide real faults behind a soothing
+ * one.
+ */
+async function withDatabase(
+  run: () => Promise<ActionState>,
+): Promise<ActionState> {
+  try {
+    return await run();
+  } catch (error) {
+    if (isRedirectError(error)) throw error;
+    if (isDatabaseUnavailableError(error)) return SERVICE_UNAVAILABLE;
+    throw error;
+  }
+}
 
 function readString(data: FormData, key: string): string {
   const value = data.get(key);
@@ -75,28 +108,30 @@ export async function signUpAction(
   const limit = consume("signUp", await clientIp());
   if (!limit.ok) return { ok: false, message: rateLimitMessage(limit) };
 
-  const result = await registerUser(parsed.data);
+  return withDatabase(async () => {
+    const result = await registerUser(parsed.data);
 
-  if (!result.ok) {
-    /*
-     * Registration is the one flow that may name the clash.
-     *
-     * The person typed this address themselves and needs to know why the form
-     * refused; any vaguer wording would just strand them. Login, forgot-password
-     * and resend-verification stay deliberately silent about whether an account
-     * exists — see their generic messages — so this does not become a way to
-     * probe for addresses through those endpoints.
-     */
-    return {
-      ok: false,
-      errors: {
-        email:
-          "An account with this email already exists. Try logging in instead, or use Forgot password if you no longer have it.",
-      },
-    };
-  }
+    if (!result.ok) {
+      /*
+       * Registration is the one flow that may name the clash.
+       *
+       * The person typed this address themselves and needs to know why the
+       * form refused; any vaguer wording would just strand them. Login,
+       * forgot-password and resend-verification stay deliberately silent about
+       * whether an account exists — see their generic messages — so this does
+       * not become a way to probe for addresses through those endpoints.
+       */
+      return {
+        ok: false,
+        errors: {
+          email:
+            "An account with this email already exists. Try logging in instead, or use Forgot password if you no longer have it.",
+        },
+      };
+    }
 
-  return { ok: true };
+    return { ok: true };
+  });
 }
 
 /* ------------------------------------------------------------------ log in */
@@ -147,6 +182,10 @@ export async function signInAction(
       };
     }
 
+    // An outage is not a wrong password, and telling someone it is sends them
+    // to reset a credential that works.
+    if (isDatabaseUnavailableError(error)) return SERVICE_UNAVAILABLE;
+
     // Everything else is deliberately indistinguishable.
     return { ok: false, message: "Invalid email or password." };
   }
@@ -164,15 +203,17 @@ export async function verifyEmailAction(token: string): Promise<ActionState> {
   const limit = consume("verifyEmail", await clientIp());
   if (!limit.ok) return { ok: false, message: rateLimitMessage(limit) };
 
-  const result = await verifyEmailToken(token);
-  if (!result.ok) {
-    return {
-      ok: false,
-      message: "This verification link is invalid or has expired.",
-    };
-  }
+  return withDatabase(async () => {
+    const result = await verifyEmailToken(token);
+    if (!result.ok) {
+      return {
+        ok: false,
+        message: "This verification link is invalid or has expired.",
+      };
+    }
 
-  return { ok: true };
+    return { ok: true };
+  });
 }
 
 export async function resendVerificationAction(
@@ -190,15 +231,17 @@ export async function resendVerificationAction(
     if (!limit.ok) return { ok: false, message: rateLimitMessage(limit) };
   }
 
-  await resendVerification(parsed.data.email);
+  return withDatabase(async () => {
+    await resendVerification(parsed.data.email);
 
-  // Always the same answer, so this cannot be used to test whether an address
-  // is registered or already verified.
-  return {
-    ok: true,
-    message:
-      "If that address needs verifying, we've sent a new link. Please check your inbox.",
-  };
+    // Always the same answer, so this cannot be used to test whether an
+    // address is registered or already verified.
+    return {
+      ok: true,
+      message:
+        "If that address needs verifying, we've sent a new link. Please check your inbox.",
+    };
+  });
 }
 
 /* ---------------------------------------------------------- password reset */
@@ -218,18 +261,20 @@ export async function forgotPasswordAction(
     if (!limit.ok) return { ok: false, message: rateLimitMessage(limit) };
   }
 
-  // The outcome is deliberately discarded. One response covers "sent",
-  // "unverified" and "no account": the unverified case still receives a
-  // verification email instead of a reset link, but saying so here would reveal
-  // both that the address exists and what state it is in.
-  await requestPasswordReset(parsed.data.email);
+  return withDatabase(async () => {
+    // The outcome is deliberately discarded. One response covers "sent",
+    // "unverified" and "no account": the unverified case still receives a
+    // verification email instead of a reset link, but saying so here would
+    // reveal both that the address exists and what state it is in.
+    await requestPasswordReset(parsed.data.email);
 
-  return {
-    ok: true,
-    message:
-      "If an eligible account exists for that email, a password reset link has been sent. " +
-      "Accounts that haven't been verified yet will receive a verification link instead.",
-  };
+    return {
+      ok: true,
+      message:
+        "If an eligible account exists for that email, a password reset link has been sent. " +
+        "Accounts that haven't been verified yet will receive a verification link instead.",
+    };
+  });
 }
 
 export async function resetPasswordAction(
@@ -249,14 +294,16 @@ export async function resetPasswordAction(
   const limit = consume("resetPassword", await clientIp());
   if (!limit.ok) return { ok: false, message: rateLimitMessage(limit) };
 
-  const result = await resetPassword(parsed.data.token, parsed.data.password);
-  if (!result.ok) {
-    return {
-      ok: false,
-      message:
-        "This reset link is invalid or has expired. Request a new one to continue.",
-    };
-  }
+  return withDatabase(async () => {
+    const result = await resetPassword(parsed.data.token, parsed.data.password);
+    if (!result.ok) {
+      return {
+        ok: false,
+        message:
+          "This reset link is invalid or has expired. Request a new one to continue.",
+      };
+    }
 
-  return { ok: true };
+    return { ok: true };
+  });
 }

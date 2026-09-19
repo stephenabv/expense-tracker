@@ -598,6 +598,24 @@ Until `DATABASE_URL` and `AUTH_SECRET` are present the deployment serves a
 "Setup required" page: the build succeeds and the site stays up, but no account
 can be created until they are set.
 
+### When the database cannot be reached
+
+A connection that never opens is reported as such — the forms say the service
+is unreachable rather than "invalid email or password", and the function log
+carries the driver's own reason. Two worth recognising, both from Supabase's
+pooler and neither a password problem:
+
+- `tenant/user postgres.<project-ref> not found` — the pooler hosts no project
+  with that ref. The project was deleted or paused, or the ref in `DATABASE_URL`
+  is not the current one. Check it against the dashboard's **Connect** dialog;
+  a ref that no longer resolves in DNS (`<project-ref>.supabase.co`) is gone.
+- The same message with a correct ref — the host's region prefix is stale.
+  Supabase moved projects off `aws-0-<region>.pooler.supabase.com`; copy the
+  whole string from **Connect** rather than editing the old one.
+
+A new `DATABASE_URL` reaches the running site only after a redeploy, and a new
+database needs `npm run db:migrate` before any account exists.
+
 ## Licence
 
 MIT
