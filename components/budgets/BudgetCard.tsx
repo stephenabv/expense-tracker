@@ -1,8 +1,18 @@
 "use client";
 
-import type { BudgetSummary } from "@/types/budget";
+import { useId, useState } from "react";
+
+import type {
+  Budget,
+  BudgetMergeSource,
+  BudgetSummary,
+  MergedSourceNode,
+} from "@/types/budget";
 import { Button } from "@/components/ui/Button";
 import { BudgetStatusBadge } from "@/components/budgets/BudgetStatusBadge";
+import { LockIcon } from "@/components/budgets/LockIcon";
+import { MergedSourcesPanel } from "@/components/budgets/MergedSourcesPanel";
+import { MergedSourcesToggle } from "@/components/budgets/MergedSourcesToggle";
 import { formatCurrency } from "@/lib/currency";
 import {
   NO_DATE_LABEL,
@@ -10,28 +20,6 @@ import {
   isTransferred,
 } from "@/lib/budgets";
 import { cn } from "@/lib/utils";
-
-function LockIcon({ open }: { open: boolean }) {
-  return (
-    <svg
-      aria-hidden="true"
-      viewBox="0 0 20 20"
-      fill="none"
-      stroke="currentColor"
-      strokeWidth={1.6}
-      strokeLinecap="round"
-      strokeLinejoin="round"
-      className="h-3.5 w-3.5"
-    >
-      <rect x="4.5" y="8.5" width="11" height="7.5" rx="2" />
-      {open ? (
-        <path d="M7.5 8.5V6.5a2.5 2.5 0 0 1 4.9-.7" />
-      ) : (
-        <path d="M7.5 8.5V6.5a2.5 2.5 0 0 1 5 0v2" />
-      )}
-    </svg>
-  );
-}
 
 export interface BudgetCardProps {
   summary: BudgetSummary;
@@ -54,11 +42,14 @@ export interface BudgetCardProps {
    * it became part of, so it now reads as ₱0 spent with its whole allotment
    * intact, which is exactly backwards. The snapshot is what it actually held.
    */
-  snapshot?: {
-    totalExpenses: number;
-    totalTransferred: number;
-    remaining: number;
-  };
+  snapshot?: BudgetMergeSource | null;
+  /**
+   * The allotments folded into this one, revealed by the card's own
+   * Expand control. Their record belongs with the money, which is here.
+   */
+  mergedSources?: MergedSourceNode[];
+  /** Opens the detail view of one of those folded-in allotments. */
+  onViewSource?: (budget: Budget) => void;
   /** Renders the card as a selectable option while a merge is being set up. */
   selection?: {
     selected: boolean;
@@ -80,6 +71,8 @@ export function BudgetCard({
   deletable = true,
   mergedIntoName,
   snapshot,
+  mergedSources = [],
+  onViewSource,
   selection,
   onView,
   onEdit,
@@ -89,11 +82,48 @@ export function BudgetCard({
   const fullySpent = status === "fully-spent";
   const merged = status === "merged";
 
+  const [showMerged, setShowMerged] = useState(false);
+  const cardId = useId();
+  const mergedPanelId = `${cardId}merged`;
+  const hasMergedSources = mergedSources.length > 0 && onViewSource !== undefined;
+
   // A merged allotment reports what it held, not what its emptied row says.
   const totalSpent = snapshot?.totalExpenses ?? totalExpenses;
   const totalMoved = snapshot?.totalTransferred ?? summary.totalTransferred;
   const balance = snapshot?.remaining ?? remaining;
   const transferred = totalMoved > 0;
+
+  /*
+   * The lock the card already shows, whichever way the budget is closed. It is
+   * built once because the Expand control anchors to it: "beside the lock" has
+   * to mean the same place whether the allotment was spent out, folded away or
+   * simply ran out of days.
+   */
+  const lockNotice =
+    fullySpent || merged ? (
+      <span className="inline-flex items-center gap-1 rounded-full bg-surface-muted px-2.5 py-1 text-[0.6875rem] font-medium text-muted-strong ring-1 ring-inset ring-border-subtle">
+        <LockIcon open={false} />
+        Locked
+      </span>
+    ) : immutable ? (
+      <span className="inline-flex items-center gap-1 rounded-full bg-surface-muted px-2.5 py-1 text-[0.6875rem] font-medium text-muted ring-1 ring-inset ring-border-subtle">
+        <LockIcon open={false} />
+        Period ended — locked
+      </span>
+    ) : null;
+
+  const mergeToggle = (
+    <MergedSourcesToggle
+      count={mergedSources.length}
+      expanded={showMerged}
+      onToggle={() => setShowMerged((open) => !open)}
+      controls={mergedPanelId}
+      budgetName={budget.name}
+      // While a merge is being set up the whole card is a checkbox; opening a
+      // record from it would fight the selection.
+      disabled={Boolean(selection)}
+    />
+  );
 
   // A budget spent to exactly its allotment hit the target; the amber "nearly
   // out" tone would read as a problem where there is none.
@@ -241,19 +271,22 @@ export function BudgetCard({
           View
         </Button>
 
+        {/*
+         * The merge record is opened from the card holding the money, and from
+         * one consistent place on it: beside View while the allotment is still
+         * open, and beside the lock once it is closed — next to whichever
+         * control says what state the budget is in.
+         */}
+        {hasMergedSources && !lockNotice ? mergeToggle : null}
+
         {/* A fully spent budget offers exactly one action. There is no edit, no
             delete and no unlock — not hidden behind a confirmation, simply not
             there, because the record is final. */}
-        {fullySpent || merged ? (
-          <span className="inline-flex items-center gap-1 rounded-full bg-surface-muted px-2.5 py-1 text-[0.6875rem] font-medium text-muted-strong ring-1 ring-inset ring-border-subtle">
-            <LockIcon open={false} />
-            Locked
-          </span>
-        ) : immutable ? (
-          <span className="inline-flex items-center gap-1 rounded-full bg-surface-muted px-2.5 py-1 text-[0.6875rem] font-medium text-muted ring-1 ring-inset ring-border-subtle">
-            <LockIcon open={false} />
-            Period ended — locked
-          </span>
+        {lockNotice ? (
+          <>
+            {lockNotice}
+            {hasMergedSources ? mergeToggle : null}
+          </>
         ) : (
           <>
             <Button variant="ghost" size="sm" onClick={onEdit}>
@@ -289,6 +322,16 @@ export function BudgetCard({
             : ""}
         </span>
       </div>
+
+      {/* Directly under the budget it belongs to, not in a section of its own
+          at the foot of the page. */}
+      {showMerged && mergedSources.length > 0 && onViewSource ? (
+        <MergedSourcesPanel
+          id={mergedPanelId}
+          sources={mergedSources}
+          onView={onViewSource}
+        />
+      ) : null}
     </article>
   );
 }
