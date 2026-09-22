@@ -200,3 +200,32 @@ export interface BudgetSummary {
   /** Days in the period, inclusive. `null` when there is no date restriction. */
   durationDays: number | null;
 }
+
+/**
+ * One folded-in allotment, as the card of the budget it was merged into
+ * presents it.
+ *
+ * `sources` carries a chain of merges: an allotment that was itself made by a
+ * merge before being folded in keeps the ones it held, so no record is lost
+ * however many times the money has been combined.
+ */
+export interface MergedSourceNode {
+  summary: BudgetSummary;
+  /**
+   * What it held when it was folded in. `null` only when the merge record is
+   * missing, in which case the live figures are all there is to show.
+   */
+  snapshot: BudgetMergeSource | null;
+  sources: MergedSourceNode[];
+}
+
+/** Merged allotments, filed under the budget whose card reveals them. */
+export interface MergedSourceGrouping {
+  /** Keyed by the id of the allotment the sources were folded into. */
+  byDestination: Map<string, MergedSourceNode[]>;
+  /**
+   * Sources whose destination is not on screen at all. They are still records
+   * of real money, so they are listed on their own rather than dropped.
+   */
+  orphans: MergedSourceNode[];
+}

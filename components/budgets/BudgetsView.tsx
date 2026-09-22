@@ -14,9 +14,10 @@ import { BudgetFormModal } from "@/components/budgets/BudgetFormModal";
 import { MergeBudgetsModal } from "@/components/budgets/MergeBudgetsModal";
 import { formatCurrency } from "@/lib/currency";
 import { sumAmounts } from "@/lib/calculations";
-import type { BudgetMergeSource, BudgetSummary } from "@/types/budget";
+import type { BudgetSummary } from "@/types/budget";
 import {
   budgetsFundedBy,
+  groupMergedSources,
   isTransferred,
   MERGED_LABEL,
   totalAllotted,
@@ -148,14 +149,27 @@ export function BudgetsView() {
       mergedBudgetSummaries.length >
     0;
 
-  /** What each merged allotment held when it was folded in, by source id. */
-  const snapshots = useMemo(() => {
-    const map = new Map<string, BudgetMergeSource>();
-    for (const merge of merges) {
-      for (const source of merge.sources) map.set(source.sourceBudgetId, source);
-    }
-    return map;
-  }, [merges]);
+  /*
+   * Every merged allotment, filed under the card that reveals it.
+   *
+   * The cards that can host a record are the open and the fully spent ones —
+   * a destination that was itself merged has no card of its own, so its
+   * sources nest under its row inside the panel that does show it.
+   */
+  const hostBudgetIds = useMemo(
+    () =>
+      new Set(
+        [...activeBudgetSummaries, ...completedBudgetSummaries].map(
+          (summary) => summary.budget.id,
+        ),
+      ),
+    [activeBudgetSummaries, completedBudgetSummaries],
+  );
+
+  const mergedSources = useMemo(
+    () => groupMergedSources(mergedBudgetSummaries, merges, hostBudgetIds),
+    [mergedBudgetSummaries, merges, hostBudgetIds],
+  );
 
   if (!hydrated) {
     return (
@@ -295,6 +309,8 @@ export function BudgetsView() {
                       }
                     : undefined
                 }
+                mergedSources={mergedSources.byDestination.get(summary.budget.id)}
+                onViewSource={setViewing}
                 onView={() => setViewing(summary.budget)}
                 onEdit={() => openEdit(summary.budget)}
                 onDelete={() => setPendingDelete(summary.budget)}
@@ -312,13 +328,15 @@ export function BudgetsView() {
         ) : null}
 
         {/*
-         * Merged allotments get their own section, apart from the fully spent
-         * ones. Both are closed and locked, but they are not the same thing: one
-         * was spent out, the other had its money moved into another allotment,
-         * and lumping them together would suggest the money is gone when it is
-         * not.
+         * A merged allotment normally lives under the budget it was folded
+         * into, behind that card's Expand control — the record sits with the
+         * money rather than in a list the user has to match up by name.
+         *
+         * This section is the exception: allotments whose destination is not on
+         * screen at all. They still record real money, so they are shown rather
+         * than dropped.
          */}
-        {mergedBudgetSummaries.length > 0 ? (
+        {mergedSources.orphans.length > 0 ? (
           <section aria-labelledby="merged-budgets-heading" className="pt-2">
             <h2
               id="merged-budgets-heading"
@@ -327,20 +345,23 @@ export function BudgetsView() {
               {MERGED_LABEL} Allotments
             </h2>
             <p className="mt-1 text-[0.8125rem] text-muted">
-              Folded into another allotment. Their expenses moved with them and
-              are kept in full; these remain as records of what they held.
+              Folded into an allotment that is no longer listed. Their expenses
+              moved with them and are kept in full; these remain as records of
+              what they held.
             </p>
 
             <div className="mt-4 grid grid-cols-1 gap-4 sm:grid-cols-2">
-              {mergedBudgetSummaries.map((summary) => (
+              {mergedSources.orphans.map((node) => (
                 <BudgetCard
-                  key={summary.budget.id}
-                  summary={summary}
-                  sourceName={nameOf(summary.budget.sourceBudgetId)}
-                  mergedIntoName={nameOf(summary.budget.mergedIntoBudgetId)}
-                  snapshot={snapshots.get(summary.budget.id)}
+                  key={node.summary.budget.id}
+                  summary={node.summary}
+                  sourceName={nameOf(node.summary.budget.sourceBudgetId)}
+                  mergedIntoName={nameOf(node.summary.budget.mergedIntoBudgetId)}
+                  snapshot={node.snapshot}
                   immutable
-                  onView={() => setViewing(summary.budget)}
+                  mergedSources={node.sources}
+                  onViewSource={setViewing}
+                  onView={() => setViewing(node.summary.budget)}
                 />
               ))}
             </div>
@@ -390,6 +411,8 @@ export function BudgetsView() {
                   summary={summary}
                   sourceName={nameOf(summary.budget.sourceBudgetId)}
                   immutable
+                  mergedSources={mergedSources.byDestination.get(summary.budget.id)}
+                  onViewSource={setViewing}
                   onView={() => setViewing(summary.budget)}
                 />
               ))}

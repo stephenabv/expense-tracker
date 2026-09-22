@@ -17,8 +17,12 @@ import type {
   BudgetAllocation,
   BudgetApplicability,
   BudgetInput,
+  BudgetMerge,
+  BudgetMergeSource,
   BudgetStatus,
   BudgetSummary,
+  MergedSourceGrouping,
+  MergedSourceNode,
 } from "@/types/budget";
 import type { Expense } from "@/types/expense";
 import {
@@ -316,6 +320,84 @@ export function budgetsMergedInto(budgets: Budget[], budgetId: string): Budget[]
   return budgets
     .filter((budget) => budget.mergedIntoBudgetId === budgetId)
     .sort((a, b) => a.name.localeCompare(b.name) || a.id.localeCompare(b.id));
+}
+
+/**
+ * File every merged allotment under the budget whose card should reveal it.
+ *
+ * A merge produces a brand-new allotment and leaves its sources behind as
+ * records. Those records belong with the money: under the budget the money
+ * ended up in, not in a separate list the user has to match up by name.
+ *
+ * `hostBudgetIds` names the budgets that actually have a card on screen. A
+ * source whose destination was itself merged nests under that destination's own
+ * row instead, which is what keeps a chain of merges readable; one whose
+ * destination is nowhere to be found comes back as an orphan rather than
+ * disappearing, because it still records real money.
+ */
+export function groupMergedSources(
+  mergedSummaries: BudgetSummary[],
+  merges: BudgetMerge[],
+  hostBudgetIds: ReadonlySet<string>,
+): MergedSourceGrouping {
+  const snapshots = new Map<string, BudgetMergeSource>();
+  for (const merge of merges) {
+    for (const source of merge.sources) snapshots.set(source.sourceBudgetId, source);
+  }
+
+  // Sources by destination, in the order they were given — the caller has
+  // already sorted them newest merge first.
+  const sourcesOf = new Map<string, BudgetSummary[]>();
+  for (const summary of mergedSummaries) {
+    const destination = summary.budget.mergedIntoBudgetId;
+    if (!destination) continue;
+    const siblings = sourcesOf.get(destination);
+    if (siblings) siblings.push(summary);
+    else sourcesOf.set(destination, [summary]);
+  }
+
+  const mergedIds = new Set(mergedSummaries.map((entry) => entry.budget.id));
+  const placed = new Set<string>();
+
+  /*
+   * `seen` guards the walk rather than trusting the rows. Every merge the
+   * server writes points at a freshly created allotment, so the chain is a
+   * tree — but a cycle in the data would otherwise recurse until the stack
+   * gives out, and a corrupted record is not worth a blank page.
+   */
+  const build = (summary: BudgetSummary, seen: ReadonlySet<string>): MergedSourceNode => {
+    const id = summary.budget.id;
+    placed.add(id);
+    const branch = new Set(seen).add(id);
+    return {
+      summary,
+      snapshot: snapshots.get(id) ?? null,
+      sources: (seen.has(id) ? [] : (sourcesOf.get(id) ?? [])).map((entry) =>
+        build(entry, branch),
+      ),
+    };
+  };
+
+  const byDestination = new Map<string, MergedSourceNode[]>();
+  const orphans: MergedSourceNode[] = [];
+
+  for (const [destination, sources] of sourcesOf) {
+    // A destination that was itself folded away carries its sources nested
+    // under its own row, wherever that row is drawn.
+    if (mergedIds.has(destination)) continue;
+    const nodes = sources.map((entry) => build(entry, new Set()));
+    if (hostBudgetIds.has(destination)) byDestination.set(destination, nodes);
+    else orphans.push(...nodes);
+  }
+
+  // Anything the walk never reached — a source pointing at a destination that
+  // is itself unreachable — is listed rather than lost.
+  for (const summary of mergedSummaries) {
+    if (placed.has(summary.budget.id)) continue;
+    orphans.push(build(summary, new Set()));
+  }
+
+  return { byDestination, orphans };
 }
 
 /** Closed allotments, newest completion first — the archive. */
